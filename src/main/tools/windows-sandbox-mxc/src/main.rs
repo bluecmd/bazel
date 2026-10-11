@@ -6,8 +6,12 @@
 //!
 //! ```text
 //! BazelSandbox [-W cwd] [-T timeout_s] [-t kill_delay_s] [-l stdout] [-L stderr]
-//!              (-w rw_path)* (-r ro_path)* (-b denied_path)* [-D] -- cmd args...
+//!              (-w rw_path)* (-r ro_path)* (-b denied_path)* [-D] [@params]* -- cmd args...
 //! ```
+//!
+//! `@params` names a file with one argument per line and is expanded in
+//! place; Bazel uses it when the path lists would exceed the Windows
+//! command-line limit.
 //!
 //! Bazel passes the declared inputs as `-r`, the outputs and `TMP` as `-w`,
 //! starts the binary with cwd = execroot and never passes `-W`. The action
@@ -64,9 +68,29 @@ struct Args {
     cmd: Vec<String>,
 }
 
+/// Expand `@file` arguments (one argument per line) in place, so the path
+/// lists can be handed over without hitting CreateProcessW's 32 767-character
+/// command-line limit. Only arguments before `--` are expanded.
+fn expand_params(raw: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut after_sep = false;
+    for a in raw {
+        if after_sep || a == "--" {
+            after_sep = after_sep || a == "--";
+            out.push(a);
+        } else if let Some(file) = a.strip_prefix('@') {
+            let text = fs::read_to_string(file).map_err(|e| format!("cannot read params file {file}: {e}"))?;
+            out.extend(text.lines().filter(|l| !l.is_empty()).map(|l| l.trim_end_matches('\r').to_string()));
+        } else {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
 fn parse_args() -> Result<Args, String> {
     let mut a = Args::default();
-    let mut it = env::args().skip(1);
+    let mut it = expand_params(env::args().skip(1).collect())?.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--" => {
