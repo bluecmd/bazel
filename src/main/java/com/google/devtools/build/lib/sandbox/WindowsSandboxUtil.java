@@ -229,6 +229,11 @@ public final class WindowsSandboxUtil {
         pathArguments.add(writablePath.getPathString());
       }
       for (Path readablePath : readableFilesAndDirectories.values()) {
+        if (readablePath == null) {
+          // A null value denotes an empty input file the sandbox is expected to create. The
+          // Windows sandbox runs in the execroot and does not create them; nothing to grant.
+          continue;
+        }
         pathArguments.add("-r");
         pathArguments.add(readablePath.getPathString());
       }
