@@ -18,6 +18,7 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.exec.local.WindowsLocalEnvProvider;
@@ -27,6 +28,8 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** Spawn runner that uses BuildXL Sandbox APIs to execute a local subprocess. */
 final class WindowsSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
@@ -81,10 +84,18 @@ final class WindowsSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               + ")");
     }
 
+    // The input mapping expands runfiles trees to their target files, but the action reaches
+    // them through the <tool>.runfiles directory, which the sandbox must be able to traverse.
+    Map<PathFragment, Path> readableFiles = new LinkedHashMap<>(readablePaths.getFiles());
+    for (ActionInput input : spawn.getInputFiles().toList()) {
+      if (input instanceof Artifact artifact && artifact.isRunfilesTree()) {
+        readableFiles.put(artifact.getExecPath(), execRoot.getRelative(artifact.getExecPath()));
+      }
+    }
     WindowsSandboxUtil.CommandLineBuilder commandLineBuilder =
         WindowsSandboxUtil.commandLineBuilder(windowsSandbox, spawn.getArguments())
             .setWritableFilesAndDirectories(writablePaths.build())
-            .setReadableFilesAndDirectories(readablePaths.getFiles())
+            .setReadableFilesAndDirectories(readableFiles)
             .setInaccessiblePaths(getInaccessiblePaths())
             .setUseDebugMode(getSandboxOptions().getSandboxDebug())
             .setKillDelay(timeoutKillDelay)
