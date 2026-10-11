@@ -338,7 +338,6 @@ public final class SandboxModule extends BlazeModule {
         WindowsPsecSpawnRunner spawnRunner =
             new WindowsPsecSpawnRunner(
                 cmdEnv,
-                sandboxBase,
                 options.getWindowsPsecPolicy(),
                 options.getWindowsSandboxReadonlyRoots(),
                 options.getWindowsPsecMaxIdleEnvironments(),

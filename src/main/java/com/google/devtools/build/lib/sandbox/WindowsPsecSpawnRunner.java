@@ -78,7 +78,6 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
 
   WindowsPsecSpawnRunner(
       CommandEnvironment cmdEnv,
-      Path sandboxBase,
       WindowsPsecPolicy mode,
       List<PathFragment> readonlyRoots,
       int maxIdleEnvironments,
@@ -88,7 +87,10 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
     this.execRoot = cmdEnv.getExecRoot();
     this.reporter = cmdEnv.getReporter();
     this.clientEnv = cmdEnv.getClientEnv();
-    this.tmpRoot = sandboxBase.getRelative(getName());
+    // Short on purpose: zipped py_binary tools extract their runfiles under TMPDIR and exceed
+    // MAX_PATH from a deeper directory (the user's %TEMP%, which local actions get, is about as
+    // long as this).
+    this.tmpRoot = cmdEnv.getDirectories().getOutputBase().getRelative("psec");
     this.tmpRoot.createDirectoryAndParents();
     this.allowNetworkForBuild = SandboxHelpers.shouldAllowNetwork(cmdEnv.getOptions());
     this.debug = debug;
@@ -309,6 +311,11 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
                   reuses)));
     }
     pool.close();
+    try {
+      tmpRoot.deleteTree();
+    } catch (IOException e) {
+      // Best effort; per-action directories are removed as actions finish.
+    }
   }
 
   @Override
