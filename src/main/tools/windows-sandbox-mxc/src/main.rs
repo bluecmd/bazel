@@ -323,6 +323,22 @@ fn main() {
         }
     }
 
+    // Bazel hands over argv[0] as it appears in the action, e.g.
+    // `external/+winsdk_configure+local_config_winsdk/rc_x64.bat`: relative and
+    // with forward slashes. CreateProcess finds the batch file, but the cmd.exe
+    // it starts for it parses the `/` as switches and fails with "'external' is
+    // not recognized". Bazel's local runner resolves argv[0] against the
+    // execroot first; do the same and use backslashes.
+    let mut argv = args.cmd.clone();
+    if let Some(first) = argv.first_mut() {
+        if first.contains(['\\', '/']) {
+            let p = Path::new(first.as_str());
+            let abs = if p.is_absolute() { p.to_path_buf() } else { Path::new(&cwd).join(p) };
+            if abs.exists() {
+                *first = abs.to_string_lossy().replace('/', "\\");
+            }
+        }
+    }
     let mut command = String::new();
     for (i, a) in argv.iter().enumerate() {
         if i > 0 {
