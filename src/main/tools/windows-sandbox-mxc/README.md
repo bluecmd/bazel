@@ -20,14 +20,19 @@ action's inputs and outputs, exactly the data Bazel already passes.
 sandboxed end to end, undeclared reads/writes/tool launches/network are denied,
 and no change to Bazel itself was needed.** It is an experiment, not a proposal
 to merge as is. Measured on Bazel 9.1.1 and 9.3.0, MXC 1.0.0, Windows 11 25H2
-build 26200.9550 (`example/run.cmd` output from the 9.3.0 run is at the end).
+build 26200.9550.
+
+The adapter is a small Rust program linking the [`mxc-sdk`](https://crates.io/crates/mxc-sdk)
+crate, so the process security environment is created in-process: Bazel ->
+`BazelSandbox.exe` -> action, with no `wxc-exec.exe` hop. (The first version
+was a C shim around `wxc-exec.exe`; the exe hop cost about 25 ms per action
+and nothing else, since `wxc-exec` is itself a thin CLI over the same crate.)
 
 ## Contents
 
 | file | what |
 |---|---|
-| `BazelSandbox.c` | The adapter. Single C file, Win32 only. |
-| `BUILD`, `build-adapter.cmd` | Build as `cc_binary` inside the Bazel tree, or standalone with MSVC. |
+| `src/main.rs`, `Cargo.toml` | The adapter. `cargo build --release` with a stable MSVC toolchain produces `target\release\BazelSandbox.exe`. |
 | `example/` | Minimal workspace: positive build, four negative targets that must fail under the sandbox, 40 trivial genrules for overhead measurement. `example/run.cmd` runs all of it. |
 
 ## Requirements
@@ -42,9 +47,9 @@ build 26200.9550 (`example/run.cmd` output from the 9.3.0 run is at the end).
   per-file read grants do not take effect. Windows Update may not offer the
   preview CU; the MSU from the Microsoft Update Catalog installs with
   `Add-WindowsPackage -Online`.
-- MXC 1.0.0 (`wxc-exec.exe`, from the `@microsoft/mxc` npm package or the
-  GitHub release). `wxc-exec.exe --probe` must report tier `base-container`
-  and `baseContainerSupportsEnumeratePaths: true`.
+- Nothing from MXC needs to be installed: the adapter links `mxc-sdk` 1.0.0
+  statically. If you have `wxc-exec.exe` around, `wxc-exec.exe --probe` should
+  report tier `base-container` and `baseContainerSupportsEnumeratePaths: true`.
 - Bazel must run from an **interactive session** (console or RDP). From an
   SSH shell (session 0, network logon token, no interactive window station)
   every tool that imports `USER32.dll` (cl.exe, node, PowerShell, whoami, ...)
@@ -55,24 +60,31 @@ build 26200.9550 (`example/run.cmd` output from the 9.3.0 run is at the end).
 ## Usage
 
 ```
+cargo build --release
 bazel build //... ^
   --experimental_use_windows_sandbox=yes ^
-  --experimental_windows_sandbox_path=C:\path\to\BazelSandbox.exe ^
+  --experimental_windows_sandbox_path=C:\path\to\target\release\BazelSandbox.exe ^
   --spawn_strategy=windows-sandbox ^
-  --action_env=BAZEL_MXC_ENUM_CWD=1 ^
-  --action_env=BAZEL_MXC_ENUM_ANCESTORS=1 ^
-  --action_env=BAZEL_MXC_UI=1 ^
   "--action_env=BAZEL_MXC_EXTRA_RO=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools;C:\Program Files (x86)\Windows Kits"
 ```
 
-`wxc-exec.exe` is expected next to `BazelSandbox.exe` (or at `BAZEL_MXC_WXC`).
 Bazel scrubs the action environment down to `PATH`/`TEMP`/`TMP`, so the adapter's
-knobs have to come in through `--action_env`. `BAZEL_MXC_KEEP=1` keeps the
-generated request JSON in `%TEMP%` for inspection.
+knobs have to come in through `--action_env`:
+
+| variable | effect |
+|---|---|
+| `BAZEL_MXC_EXTRA_RO=<p>;<p>` | extra read-only roots for toolchains Bazel does not declare as inputs |
+| `BAZEL_MXC_DIR_GRANTS=1` | grant the parent directory of each read-only input file instead of the file (cheaper policy, exposes sibling files) |
+| `BAZEL_MXC_NO_ENUM=1` | do not list the cwd and the grants' ancestors as enumerate-only |
+| `BAZEL_MXC_NO_UI=1` | keep the Win32k lockdown (USER32 importers then fail) |
+| `BAZEL_MXC_TIMING=<file>` | append per-action prep/spawn/wait milliseconds and grant counts |
+| `BAZEL_MXC_DEBUG=1` | print the effective policy to stderr (`-D` does the same) |
 
 ## What the adapter does
 
-For each action it writes a schema-1.0.0 request and runs `wxc-exec.exe` on it:
+For each action it builds a `ContainerRequest` with `Containment::ProcessContainer`
+and calls `mxc_sdk::v1::spawn`, pumping the child's stdout/stderr to its own
+(or to the `-l`/`-L` files):
 
 - `-r` paths become `filesystem.readonlyPaths`, `-w` paths `readwritePaths`,
   `-b` paths `deniedPaths`. The execroot is a symlink forest and MXC evaluates
@@ -82,24 +94,29 @@ For each action it writes a schema-1.0.0 request and runs `wxc-exec.exe` on it:
   cannot grant a non-existent file, so output grants are widened to the parent
   directory. (Per-file read-write grants on *existing* files work on .9550;
   they did not on .9457.)
-- Bazel passes no `-W`; the adapter inherits its own cwd (the execroot).
-  `BAZEL_MXC_ENUM_CWD` lists it as enumerate-only when no grant covers it.
-- `BAZEL_MXC_ENUM_ANCESTORS` lists every ancestor of every grant and of the
-  cwd, up to `C:\`, in `processContainer.filesystem.enumeratePaths`, unless a
-  grant already covers it. MXC applies the *most restrictive* intent to a path
+- Bazel passes no `-W`; the adapter inherits its own cwd (the execroot) and
+  lists it as enumerate-only when no grant covers it.
+- Every ancestor of every grant and of the cwd, up to `C:\`, goes into
+  `enumerate_paths` unless a grant already covers it (disable with
+  `BAZEL_MXC_NO_ENUM`). MXC applies the *most restrictive* intent to a path
   listed twice, so enumerating a granted path would downgrade it. Enumeration
   grants listing only, no reads. Without this, `dir`, `realpath`, and launching
   an exe from a granted directory all fail with "Access is denied"
   (MXC issues 1109, 1162).
-- The adapter's environment is passed verbatim as `process.env`. MXC's
-  "default environment" is the user's *profile* block, not the parent's, so
-  with `inheritDefaultEnv` cl.exe lost `INCLUDE` and failed with C1083.
-- `BAZEL_MXC_UI` emits `ui.disable=false` and
-  `processContainer.ui.isolation="desktop"`. Without it anything importing
-  USER32 fails to initialise, as MXC documents.
+- The adapter's environment is passed verbatim (`inherit_default_environment
+  = false`). MXC's "default environment" is the user's *profile* block, not
+  the parent's, so with inheritance cl.exe lost `INCLUDE` and failed with
+  C1083. MXC insists on `USERPROFILE` and `LOCALAPPDATA` being present, so
+  those two are added when Bazel's scrubbed environment lacks them.
+- Nested grants are pruned (a file under a granted directory is not listed
+  again) and, with `BAZEL_MXC_DIR_GRANTS`, read-only file grants are replaced
+  by their parent directory.
+- UI: `ui.disable = false` and `ProcessContainerUiIsolation::Desktop` by
+  default. Without that anything importing USER32 fails to initialise, as MXC
+  documents (`BAZEL_MXC_NO_UI` restores the lockdown).
 - Network: egress and ingress `deny`. Bazel has no flag for this on Windows
   yet; `--sandbox_default_allow_network` is not plumbed through.
-- `-t` (kill delay) is accepted and ignored; `-T` becomes `process.timeout`.
+- `-t` (kill delay) is accepted and ignored; `-T` becomes `timeout_ms`.
 
 ## Results
 
@@ -175,8 +192,8 @@ supportable feature:
 2. Plumb `--sandbox_default_allow_network` / `requires-network` through to
    the Windows runner.
 3. Grant inputs by directory where possible (the per-path cost is linear).
-4. Ship or fetch `wxc-exec.exe` + the adapter, or let the adapter be a Bazel
-   module, so `--experimental_use_windows_sandbox=auto` can find it.
+4. Ship the adapter (a single static exe, nothing else to install) or let it
+   be a Bazel module, so `--experimental_use_windows_sandbox=auto` can find it.
 
 ## `example/run.cmd` output (Bazel 9.3.0, 2026-10-11, abridged)
 

@@ -276,8 +276,20 @@ fn main() {
         dedupe(&mut enumerate_paths);
     }
 
+    // Bazel's local runner resolves a relative argv[0] against the execroot
+    // before CreateProcess; do the same, or `external\...\tool.bat` is handed
+    // to cmd.exe unresolved and fails with "'external' is not recognized".
+    let mut argv = args.cmd.clone();
+    if let Some(first) = argv.first_mut() {
+        if first.contains(['\\', '/']) && !Path::new(first.as_str()).is_absolute() {
+            let abs = Path::new(&cwd).join(first.as_str());
+            if abs.exists() {
+                *first = abs.to_string_lossy().into_owned();
+            }
+        }
+    }
     let mut command = String::new();
-    for (i, a) in args.cmd.iter().enumerate() {
+    for (i, a) in argv.iter().enumerate() {
         if i > 0 {
             command.push(' ');
         }
