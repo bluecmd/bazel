@@ -87,14 +87,15 @@ final class WindowsSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
             .setReadableFilesAndDirectories(readablePaths.getFiles())
             .setInaccessiblePaths(getInaccessiblePaths())
             .setUseDebugMode(getSandboxOptions().getSandboxDebug())
-            .setKillDelay(timeoutKillDelay);
+            .setKillDelay(timeoutKillDelay)
+            .setParamsFile(tmpDir.getRelative("params"));
 
     if (!timeout.isZero()) {
       commandLineBuilder.setTimeout(timeout);
     }
 
     return new WindowsSandboxedSpawn(
-        execRoot, environment, commandLineBuilder.build(), spawn.getMnemonic());
+        execRoot, environment, commandLineBuilder.build(), spawn.getMnemonic(), tmpDir);
   }
 
   private static Path createActionTemp(Path execRoot) throws IOException {

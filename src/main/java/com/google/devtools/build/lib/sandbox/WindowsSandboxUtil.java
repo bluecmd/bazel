@@ -19,7 +19,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.flogger.GoogleLogger;
-import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.shell.Subprocess;
 import com.google.devtools.build.lib.shell.SubprocessBuilder;
 import com.google.devtools.build.lib.shell.SubprocessBuilder.StreamAction;
@@ -30,6 +29,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -64,7 +64,7 @@ public final class WindowsSandboxUtil {
 
     ByteArrayOutputStream outErrBytes = new ByteArrayOutputStream();
     try {
-      ByteStreams.copy(process.getInputStream(), outErrBytes);
+      process.getInputStream().transferTo(outErrBytes);
     } catch (IOException e) {
       try {
         outErrBytes.write(("Failed to read stdout: " + e).getBytes(StandardCharsets.UTF_8));
@@ -110,6 +110,7 @@ public final class WindowsSandboxUtil {
     private Map<PathFragment, Path> readableFilesAndDirectories = new TreeMap<>();
     private Set<Path> inaccessiblePaths = ImmutableSet.of();
     private boolean useDebugMode = false;
+    private Path paramsFile = null;
     private List<String> commandArguments = ImmutableList.of();
 
     private CommandLineBuilder(PathFragment windowsSandboxPath, List<String> commandArguments) {
@@ -186,14 +187,26 @@ public final class WindowsSandboxUtil {
     }
 
     /**
+     * File to spill the path arguments into (as {@code @file}, one argument per line) when the
+     * command line would otherwise exceed the Windows limit of 32767 characters. Actions with
+     * thousands of inputs (javac, linkers) hit that limit easily.
+     */
+    @CanIgnoreReturnValue
+    public CommandLineBuilder setParamsFile(Path paramsFile) {
+      this.paramsFile = paramsFile;
+      return this;
+    }
+
+    /**
      * Builds the command line to invoke a specific command using the {@code windows-sandbox} tool.
      */
-    public ImmutableList<String> build() {
+    /** Command lines longer than this are spilled into the params file. */
+    private static final int MAX_COMMAND_LINE_LENGTH = 30000;
+
+    public ImmutableList<String> build() throws IOException {
       Preconditions.checkNotNull(this.windowsSandboxPath, "windowsSandboxPath is required");
       Preconditions.checkState(!this.commandArguments.isEmpty(), "commandArguments are required");
-
       ImmutableList.Builder<String> commandLineBuilder = ImmutableList.builder();
-
       commandLineBuilder.add(windowsSandboxPath.getPathString());
       if (workingDirectory != null) {
         commandLineBuilder.add("-W", workingDirectory.getPathString());
@@ -210,21 +223,42 @@ public final class WindowsSandboxUtil {
       if (stderrPath != null) {
         commandLineBuilder.add("-L", stderrPath.getPathString());
       }
+      List<String> pathArguments = new ArrayList<>();
       for (Path writablePath : writableFilesAndDirectories) {
-        commandLineBuilder.add("-w", writablePath.getPathString());
+        pathArguments.add("-w");
+        pathArguments.add(writablePath.getPathString());
       }
       for (Path readablePath : readableFilesAndDirectories.values()) {
-        commandLineBuilder.add("-r", readablePath.getPathString());
+        pathArguments.add("-r");
+        pathArguments.add(readablePath.getPathString());
       }
       for (Path writablePath : inaccessiblePaths) {
-        commandLineBuilder.add("-b", writablePath.getPathString());
+        pathArguments.add("-b");
+        pathArguments.add(writablePath.getPathString());
+      }
+      int length = 0;
+      for (String arg : commandArguments) {
+        length += arg.length() + 3;
+      }
+      for (String arg : pathArguments) {
+        length += arg.length() + 3;
+      }
+      if (paramsFile != null && length > MAX_COMMAND_LINE_LENGTH) {
+        StringBuilder contents = new StringBuilder();
+        for (String arg : pathArguments) {
+          contents.append(arg).append('\n');
+        }
+        com.google.devtools.build.lib.vfs.FileSystemUtils.writeContent(
+            paramsFile, StandardCharsets.UTF_8, contents.toString());
+        commandLineBuilder.add("@" + paramsFile.getPathString());
+      } else {
+        commandLineBuilder.addAll(pathArguments);
       }
       if (useDebugMode) {
         commandLineBuilder.add("-D");
       }
       commandLineBuilder.add("--");
       commandLineBuilder.addAll(commandArguments);
-
       return commandLineBuilder.build();
     }
   }

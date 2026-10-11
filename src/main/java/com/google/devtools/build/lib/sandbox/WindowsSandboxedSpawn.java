@@ -27,16 +27,27 @@ public class WindowsSandboxedSpawn implements SandboxedSpawn {
   private final ImmutableMap<String, String> environment;
   private final ImmutableList<String> arguments;
   private final String mnemonic;
+  @Nullable private final Path tmpDir;
 
   public WindowsSandboxedSpawn(
       Path execRoot,
       ImmutableMap<String, String> environment,
       ImmutableList<String> arguments,
       String mnemonic) {
+    this(execRoot, environment, arguments, mnemonic, null);
+  }
+
+  public WindowsSandboxedSpawn(
+      Path execRoot,
+      ImmutableMap<String, String> environment,
+      ImmutableList<String> arguments,
+      String mnemonic,
+      @Nullable Path tmpDir) {
     this.execRoot = execRoot;
     this.environment = environment;
     this.arguments = arguments;
     this.mnemonic = mnemonic;
+    this.tmpDir = tmpDir;
   }
 
   @Override
@@ -80,5 +91,13 @@ public class WindowsSandboxedSpawn implements SandboxedSpawn {
   public void copyOutputs(Path execRoot) throws IOException {}
 
   @Override
-  public void delete() {}
+  public void delete() {
+    if (tmpDir != null) {
+      try {
+        tmpDir.deleteTree();
+      } catch (IOException e) {
+        // Best effort; the directory lives under the execroot and is small.
+      }
+    }
+  }
 }
