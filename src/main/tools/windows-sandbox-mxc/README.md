@@ -168,6 +168,17 @@ steps, JS bundles) unless inputs are granted by directory rather than by file.
   `BaseNamedObjects` directory (MXC issue 1061). `genrule(cmd=...)`,
   `sh_binary`, `sh_test` and anything else going through `BAZEL_SH` will not
   work until that is fixed. `cmd_bat` genrules and native tools are fine.
+- **`TEMP`/`TMP`/`LOCALAPPDATA` are rewritten inside the container** to a
+  per-container `AppData\Local\Packages\sandbox.{guid}\AC\Temp`, whatever the
+  adapter passes, so Bazel's `-w <TMP>` grant is not where tools actually
+  write. Writing there works, but a directory the tool creates there with an
+  owner-only DACL (Python's `tempfile.mkdtemp()` does that since the 2024
+  hardening) is then inaccessible to the tool itself: the process-container
+  token does not satisfy an owner-only ACL, while inside an explicitly granted
+  path the policy makes it work. Consequence: zipped `py_binary` tools
+  (`--build_python_zip`, the default on Windows) fail on extraction with
+  `PermissionError`; `--nobuild_python_zip` avoids it and is what the
+  measurements use for both configurations.
 - **Interactive session required**, see above. CI agents running as a service
   will need a logged-on session (autologon + scheduled task with `/it`, or
   equivalent).
