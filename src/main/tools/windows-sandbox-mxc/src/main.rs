@@ -364,6 +364,19 @@ fn main() {
             environment.push((name.to_string(), value));
         }
     }
+    // Windows rewrites TEMP/TMP/LOCALAPPDATA for a process container to a
+    // per-container AppData\Local\Packages\sandbox.{guid}\AC\Temp, whatever we
+    // pass. Files can be written there, but a directory created there with an
+    // owner-only DACL (Python's tempfile.mkdtemp) is inaccessible to the
+    // container itself, so zipped py_binary tools fail to extract. Python
+    // honours TMPDIR first and Windows leaves it alone, so point it at the
+    // per-action temp directory Bazel granted us.
+    if !environment.iter().any(|(k, _)| k.eq_ignore_ascii_case("TMPDIR")) {
+        if let Some((_, tmp)) = environment.iter().find(|(k, _)| k.eq_ignore_ascii_case("TMP")) {
+            let tmp = tmp.clone();
+            environment.push(("TMPDIR".to_string(), tmp));
+        }
+    }
 
     let mut pc = ProcessContainerConfig::default();
     let mut fs_cfg = ProcessContainerFilesystem::default();
