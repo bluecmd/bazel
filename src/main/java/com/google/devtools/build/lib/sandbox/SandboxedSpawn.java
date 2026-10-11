@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.sandbox;
 
+import com.google.devtools.build.lib.shell.SubprocessFactory;
 import com.google.devtools.build.lib.util.DescribableExecutionUnit;
 import com.google.devtools.build.lib.vfs.Path;
 import java.io.IOException;
@@ -34,6 +35,15 @@ interface SandboxedSpawn extends DescribableExecutionUnit {
   /** Returns {@code true}, if the runner should use the Subprocess timeout feature. */
   default boolean useSubprocessTimeout() {
     return false;
+  }
+
+  /**
+   * Returns the factory to start the subprocess with, or null for the default one. Sandboxes that
+   * confine the process at creation time (e.g. a Windows process security environment) use this.
+   */
+  @Nullable
+  default SubprocessFactory getSubprocessFactory() {
+    return null;
   }
 
   /** Returns the path that sandbox debug output is written to, if any. */

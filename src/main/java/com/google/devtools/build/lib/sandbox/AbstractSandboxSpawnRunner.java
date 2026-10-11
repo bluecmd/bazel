@@ -51,6 +51,7 @@ import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.server.FailureDetails.Sandbox.Code;
 import com.google.devtools.build.lib.shell.Subprocess;
 import com.google.devtools.build.lib.shell.SubprocessBuilder;
+import com.google.devtools.build.lib.shell.SubprocessFactory;
 import com.google.devtools.build.lib.shell.TerminationStatus;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
 import com.google.devtools.build.lib.util.OS;
@@ -266,7 +267,11 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
     FileOutErr outErr = context.getFileOutErr();
     Duration timeout = context.getTimeout();
 
-    SubprocessBuilder subprocessBuilder = new SubprocessBuilder(clientEnv);
+    SubprocessFactory subprocessFactory = sandbox.getSubprocessFactory();
+    SubprocessBuilder subprocessBuilder =
+        subprocessFactory != null
+            ? new SubprocessBuilder(clientEnv, subprocessFactory)
+            : new SubprocessBuilder(clientEnv);
     subprocessBuilder.setWorkingDirectory(sandbox.getSandboxExecRoot().getPathFile());
     // If the spawn redirects its standard output into one of its outputs, write to that output
     // inside the sandbox instead of the regular stdout capture buffer. The file is a regular
