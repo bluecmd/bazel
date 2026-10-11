@@ -175,12 +175,14 @@ class server, 64 GB; Linux (Talos, kernel 6.18) on a 16-thread Xeon D-1541
 
 | configuration | wall time, s (runs in order) | mean | vs. local |
 |---|---|---|---|
-| Windows `--spawn_strategy=windows-sandbox` (MXC, per-file grants) | 3290, 3305, 3303 | 3299 | +59 % |
-| Windows `--spawn_strategy=local` | 2103, 2074, 2034 | 2070 | |
-| Linux `--spawn_strategy=linux-sandbox` | 1792, 1796, PENDING | | +1 % |
-| Linux `--spawn_strategy=local` | 1773, 1765, PENDING | | |
+| Windows `--spawn_strategy=windows-sandbox` (MXC, per-file grants) | 3290, 3305, 3303 (unprofiled: 3285) | 3299 | +59 % |
+| Windows `--spawn_strategy=local` | 2103, 2074, 2034 (unprofiled: 2014) | 2070 | |
+| Linux `--spawn_strategy=linux-sandbox` | 1792, 1796, 1803 (unprofiled: 1789) | 1797 | +1.4 % |
+| Linux `--spawn_strategy=local` | 1773, 1765, 1775 (unprofiled: 1769) | 1771 | |
 
-Unprofiled check runs: PENDING.
+The unprofiled check runs show the profiler costing under 1 % on the sandboxed
+builds and 1-3 % on the local ones (the local runs also drifted down slowly
+over the evening: 2103, 2074, 2034, 2014).
 
 Per action (box, mean over the run; profile "action processing" spans):
 
