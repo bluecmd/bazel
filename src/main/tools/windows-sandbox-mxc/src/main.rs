@@ -274,18 +274,33 @@ fn main() {
     }
     add_targets(&mut ro);
     add_targets(&mut rw);
+    // MXC applies the most restrictive intent to a path listed twice (or to a
+    // path under a directory listed with a weaker intent), so a read-only grant
+    // must never equal or contain a read-write grant: outputs would become
+    // read-only ("Cannot open compiler generated file ... Permission denied").
+    let rw_keys: Vec<String> = rw.iter().map(|p| key(p)).collect();
+    let contains_rw = |d: &str| {
+        let dk = key(d);
+        rw_keys.iter().any(|r| {
+            *r == dk || (r.len() > dk.len() && r.starts_with(dk.as_str()) && (dk.ends_with('\\') || r.as_bytes()[dk.len()] == b'\\'))
+        })
+    };
     if dir_grants {
         ro = ro
             .into_iter()
             .map(|p| {
                 if Path::new(&p).is_file() {
-                    Path::new(&p).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or(p)
+                    match Path::new(&p).parent().map(|d| d.to_string_lossy().into_owned()) {
+                        Some(d) if !contains_rw(&d) => d,
+                        _ => p,
+                    }
                 } else {
                     p
                 }
             })
             .collect();
     }
+    ro.retain(|p| !contains_rw(p) || !Path::new(p).is_dir() && !rw_keys.contains(&key(p)));
     dedupe(&mut ro);
     dedupe(&mut rw);
     prune_nested(&mut ro);
