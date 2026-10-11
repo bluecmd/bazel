@@ -212,11 +212,12 @@ up to 6 700 inputs; 55 % of all actions have fewer than 250). The
 action itself also runs slower in the container: CppCompile about 2x, Javac
 about 1.3x, which is file-access mediation cost, not the adapter.
 
-Directory grants (`BAZEL_MXC_DIR_GRANTS=1`, measured on the 8-vCPU VM, same
-protocol, one run each): local 2818 s, per-file grants 4455 s (+58 %),
-directory grants 3853 s (+37 %). Spawn drops to a median of 0.26 s with
-~20 grants per action; what remains is the in-container slowdown of the
-actions themselves.
+Directory grants (`BAZEL_MXC_DIR_GRANTS=1`): on the box, two runs after the
+protocol above, 2858 s and 2875 s (+38 % over local, against +59 % with
+per-file grants); on the 8-vCPU VM, one run each: local 2818 s, per-file
+grants 4455 s (+58 %), directory grants 3853 s (+37 %). Spawn drops to a
+median of about 0.3 s with ~20 grants per action; what remains is the
+in-container slowdown of the actions themselves.
 
 For reference, the default strategies (persistent Javac workers) built the
 same tree in 1289 s on the VM against 2776 s with `--spawn_strategy=local`,
