@@ -29,8 +29,14 @@ java_library(
 
 java_library(
     name = "processes",
-    srcs = ["WindowsProcesses.java"],
-    deps = ["//src/main/java/com/google/devtools/build/lib/jni"],
+    srcs = [
+        "WindowsProcesses.java",
+        "WindowsPsec.java",
+    ],
+    deps = [
+        "//src/main/java/com/google/devtools/build/lib/jni",
+        "//third_party/java/jsr305_annotations",
+    ],
 )
 
 java_library(

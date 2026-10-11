@@ -57,6 +57,23 @@ public class WindowsProcesses {
       String stderrFile,
       boolean redirectErrorStream);
 
+  /**
+   * Like {@link #createProcess(String, String, byte[], String, String, String, boolean)}, but the
+   * process and its whole process tree run confined by a process security environment.
+   *
+   * @param securityEnvironment a handle from {@link WindowsPsec#createEnvironment}; it must stay
+   *     open until the process has been created
+   */
+  public static native long createProcessInSecurityEnvironment(
+      String argv0,
+      String argvRest,
+      byte[] env,
+      String cwd,
+      String stdoutFile,
+      String stderrFile,
+      boolean redirectErrorStream,
+      long securityEnvironment);
+
   public static long createProcess(
       String argv0, String argvRest, byte[] env, String cwd, String stdoutFile, String stderrFile) {
     return createProcess(argv0, argvRest, env, cwd, stdoutFile, stderrFile, false);

@@ -37,7 +37,24 @@ import javax.annotation.Nullable;
 
 /** A subprocess factory that uses the Win32 API. */
 public class WindowsSubprocessFactory implements SubprocessFactory {
-  public static final WindowsSubprocessFactory INSTANCE = new WindowsSubprocessFactory();
+  public static final WindowsSubprocessFactory INSTANCE = new WindowsSubprocessFactory(0);
+
+  /** Handle of the process security environment to start processes in, or 0 for none. */
+  private final long securityEnvironment;
+
+  private WindowsSubprocessFactory(long securityEnvironment) {
+    this.securityEnvironment = securityEnvironment;
+  }
+
+  /**
+   * Returns a factory whose processes run confined by the given process security environment (see
+   * {@link com.google.devtools.build.lib.windows.WindowsPsec}). The caller keeps the environment
+   * open until the processes have been started.
+   */
+  public static WindowsSubprocessFactory inSecurityEnvironment(long securityEnvironment) {
+    Preconditions.checkArgument(securityEnvironment != 0);
+    return new WindowsSubprocessFactory(securityEnvironment);
+  }
 
   public static void maybeInstallWindowsSubprocessFactory() {
     if (OS.getCurrent() == OS.WINDOWS) {
@@ -78,8 +95,18 @@ public class WindowsSubprocessFactory implements SubprocessFactory {
     String stderrPath = getRedirectPath(builder.getStderr(), builder.getStderrFile());
 
     long nativeProcess =
-        WindowsProcesses.createProcess(
-            argv0, argvRest, env, cwd, stdoutPath, stderrPath, builder.redirectErrorStream());
+        securityEnvironment == 0
+            ? WindowsProcesses.createProcess(
+                argv0, argvRest, env, cwd, stdoutPath, stderrPath, builder.redirectErrorStream())
+            : WindowsProcesses.createProcessInSecurityEnvironment(
+                argv0,
+                argvRest,
+                env,
+                cwd,
+                stdoutPath,
+                stderrPath,
+                builder.redirectErrorStream(),
+                securityEnvironment);
     String error = WindowsProcesses.processGetLastError(nativeProcess);
     if (!error.isEmpty()) {
       WindowsProcesses.deleteProcess(nativeProcess);

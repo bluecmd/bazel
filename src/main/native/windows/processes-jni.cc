@@ -186,7 +186,8 @@ class NativeProcess {
   jboolean Create(JNIEnv* env, jstring java_argv0, jstring java_argv_rest,
                   jbyteArray java_env, jstring java_cwd,
                   jstring java_stdout_redirect, jstring java_stderr_redirect,
-                  jboolean redirectErrorStream) {
+                  jboolean redirectErrorStream,
+                  HANDLE security_environment = nullptr) {
     std::wstring wpath(bazel::windows::GetJavaWpath(env, java_argv0));
 
     std::wstring stdout_redirect = bazel::windows::AddUncPrefixMaybe(
@@ -367,7 +368,8 @@ class NativeProcess {
     return proc_.Create(
         wpath, bazel::windows::GetJavaWstring(env, java_argv_rest),
         env_map.ptr(), bazel::windows::GetJavaWpath(env, java_cwd),
-        stdin_process, stdout_process, stderr_process, nullptr, &error_);
+        stdin_process, stdout_process, stderr_process, nullptr, &error_,
+        security_environment);
   }
 
   void CloseStdin() {
@@ -458,6 +460,20 @@ Java_com_google_devtools_build_lib_windows_WindowsProcesses_createProcess(
   result->Create(env, java_argv0, java_argv_rest, java_env, java_cwd,
                  java_stdout_redirect, java_stderr_redirect,
                  redirectErrorStream);
+  return PtrAsJlong(result);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_google_devtools_build_lib_windows_WindowsProcesses_createProcessInSecurityEnvironment(
+    JNIEnv* env, jclass clazz, jstring java_argv0, jstring java_argv_rest,
+    jbyteArray java_env, jstring java_cwd, jstring java_stdout_redirect,
+    jstring java_stderr_redirect, jboolean redirectErrorStream,
+    jlong security_environment) {
+  NativeProcess* result = new NativeProcess();
+  result->Create(env, java_argv0, java_argv_rest, java_env, java_cwd,
+                 java_stdout_redirect, java_stderr_redirect,
+                 redirectErrorStream,
+                 reinterpret_cast<HANDLE>(security_environment));
   return PtrAsJlong(result);
 }
 

@@ -56,6 +56,14 @@ cc_library(
     deps = [":lib-file"],
 )
 
+cc_library(
+    name = "lib-psec",
+    srcs = ["psec.cc"],
+    hdrs = ["psec.h"],
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//src/test/native:__subpackages__"],
+)
+
 cc_binary(
     name = "windows_jni.dll",
     srcs = [
@@ -63,6 +71,7 @@ cc_binary(
         "jni-util.cc",
         "jni-util.h",
         "processes-jni.cc",
+        "psec-jni.cc",
         "sleep_prevention_jni.cc",
         "system_cpu_speed_monitor_jni.cc",
         "system_disk_space_monitor_jni.cc",
@@ -82,6 +91,7 @@ cc_binary(
     deps = [
         ":lib-file",
         ":lib-process",
+        ":lib-psec",
         "//src/main/native:blake3_jni",
     ],
 )
