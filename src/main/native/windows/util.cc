@@ -79,14 +79,15 @@ wstring GetLastErrorString(DWORD error_code) {
 
 bool AutoAttributeList::Create(HANDLE stdin_h, HANDLE stdout_h, HANDLE stderr_h,
                                std::unique_ptr<AutoAttributeList>* result,
-                               wstring* error_msg) {
+                               wstring* error_msg,
+                               HANDLE security_environment) {
   if (stdin_h == INVALID_HANDLE_VALUE && stdout_h == INVALID_HANDLE_VALUE &&
-      stderr_h == INVALID_HANDLE_VALUE) {
+      stderr_h == INVALID_HANDLE_VALUE && security_environment == nullptr) {
     result->reset(new AutoAttributeList());
     return true;
   }
 
-  static constexpr DWORD kAttributeCount = 1;
+  const DWORD kAttributeCount = security_environment != nullptr ? 2 : 1;
 
   SIZE_T size = 0;
   // According to MSDN, the first call to InitializeProcThreadAttributeList is
@@ -107,13 +108,30 @@ bool AutoAttributeList::Create(HANDLE stdin_h, HANDLE stdout_h, HANDLE stderr_h,
     return false;
   }
 
-  std::unique_ptr<AutoAttributeList> attr_list(
-      new AutoAttributeList(std::move(data), stdin_h, stdout_h, stderr_h));
-  if (!UpdateProcThreadAttribute(
+  std::unique_ptr<AutoAttributeList> attr_list(new AutoAttributeList(
+      std::move(data), stdin_h, stdout_h, stderr_h, security_environment));
+  if (attr_list->handles_.ValidHandlesCount() > 0 &&
+      !UpdateProcThreadAttribute(
           attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
           attr_list->handles_.ValidHandles(),
           attr_list->handles_.ValidHandlesCount() * sizeof(HANDLE), nullptr,
           nullptr)) {
+    if (error_msg) {
+      DWORD err = GetLastError();
+      *error_msg = MakeErrorMessage(WSTR(__FILE__), __LINE__,
+                                    L"UpdateProcThreadAttribute", L"", err);
+    }
+    return false;
+  }
+  // ProcThreadAttributeSecurityEnvironment (35) | PROC_THREAD_ATTRIBUTE_INPUT;
+  // not declared in the SDK headers yet. See psec.h.
+  static constexpr DWORD_PTR kProcThreadAttributeSecurityEnvironment =
+      35 | 0x00020000;
+  if (security_environment != nullptr &&
+      !UpdateProcThreadAttribute(attrs, 0,
+                                 kProcThreadAttributeSecurityEnvironment,
+                                 &attr_list->security_environment_,
+                                 sizeof(HANDLE), nullptr, nullptr)) {
     if (error_msg) {
       DWORD err = GetLastError();
       *error_msg = MakeErrorMessage(WSTR(__FILE__), __LINE__,
@@ -157,11 +175,16 @@ AutoAttributeList::StdHandles::StdHandles(HANDLE stdin_h, HANDLE stdout_h,
 
 AutoAttributeList::AutoAttributeList(std::unique_ptr<uint8_t[]>&& data,
                                      HANDLE stdin_h, HANDLE stdout_h,
-                                     HANDLE stderr_h)
-    : data_(std::move(data)), handles_(stdin_h, stdout_h, stderr_h) {}
+                                     HANDLE stderr_h,
+                                     HANDLE security_environment)
+    : data_(std::move(data)),
+      handles_(stdin_h, stdout_h, stderr_h),
+      security_environment_(security_environment) {}
 
 AutoAttributeList::~AutoAttributeList() {
-  DeleteProcThreadAttributeList(*this);
+  if (data_) {
+    DeleteProcThreadAttributeList(*this);
+  }
 }
 
 AutoAttributeList::operator LPPROC_THREAD_ATTRIBUTE_LIST() const {
@@ -176,6 +199,8 @@ void AutoAttributeList::InitStartupInfoExW(STARTUPINFOEXW* startup_info) const {
     startup_info->StartupInfo.hStdInput = handles_.StdIn();
     startup_info->StartupInfo.hStdOutput = handles_.StdOut();
     startup_info->StartupInfo.hStdError = handles_.StdErr();
+    startup_info->lpAttributeList = *this;
+  } else if (HasSecurityEnvironment()) {
     startup_info->lpAttributeList = *this;
   }
 }

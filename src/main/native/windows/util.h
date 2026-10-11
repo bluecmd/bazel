@@ -73,12 +73,17 @@ class AutoAttributeList {
  public:
   AutoAttributeList() {}
 
+  // If `security_environment` is not null, the list also attaches the
+  // process to that process security environment (see psec.h).
   static bool Create(HANDLE stdin_h, HANDLE stdout_h, HANDLE stderr_h,
                      std::unique_ptr<AutoAttributeList>* result,
-                     std::wstring* error_msg = nullptr);
+                     std::wstring* error_msg = nullptr,
+                     HANDLE security_environment = nullptr);
   ~AutoAttributeList();
 
   bool InheritAnyHandles() const { return handles_.ValidHandlesCount() > 0; }
+
+  bool HasSecurityEnvironment() const { return security_environment_ != nullptr; }
 
   void InitStartupInfoExW(STARTUPINFOEXW* startup_info) const;
 
@@ -113,7 +118,8 @@ class AutoAttributeList {
   };
 
   AutoAttributeList(std::unique_ptr<uint8_t[]>&& data, HANDLE stdin_h,
-                    HANDLE stdout_h, HANDLE stderr_h);
+                    HANDLE stdout_h, HANDLE stderr_h,
+                    HANDLE security_environment);
   AutoAttributeList(const AutoAttributeList&) = delete;
   AutoAttributeList& operator=(const AutoAttributeList&) = delete;
 
@@ -121,6 +127,9 @@ class AutoAttributeList {
 
   std::unique_ptr<uint8_t[]> data_;
   StdHandles handles_;
+  // UpdateProcThreadAttribute stores a pointer to the value, so it must live
+  // as long as the list.
+  HANDLE security_environment_ = nullptr;
 };
 
 #define WSTR1(x) L##x

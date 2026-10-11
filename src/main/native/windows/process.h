@@ -42,10 +42,13 @@ class WaitableProcess {
   bool Create(const std::wstring& argv0, const std::wstring& argv_rest,
               void* env, const std::wstring& wcwd, std::wstring* error);
 
+  // If `security_environment` is not null, the process (and its whole tree)
+  // runs confined by that process security environment (see psec.h).
   bool Create(const std::wstring& argv0, const std::wstring& argv_rest,
               void* env, const std::wstring& wcwd, HANDLE stdin_process,
               HANDLE stdout_process, HANDLE stderr_process,
-              LARGE_INTEGER* opt_out_start_time, std::wstring* error);
+              LARGE_INTEGER* opt_out_start_time, std::wstring* error,
+              HANDLE security_environment = nullptr);
 
   int WaitFor(int64_t timeout_msec, LARGE_INTEGER* opt_out_end_time,
               std::wstring* error);
@@ -61,7 +64,8 @@ class WaitableProcess {
               void* env, const std::wstring& wcwd, HANDLE stdin_process,
               HANDLE stdout_process, HANDLE stderr_process,
               LARGE_INTEGER* opt_out_start_time, bool create_window,
-              bool handle_signals, std::wstring* error);
+              bool handle_signals, HANDLE security_environment,
+              std::wstring* error);
 
   AutoHandle process_, job_, ioport_;
   DWORD pid_, exit_code_;

@@ -51,7 +51,7 @@ bool WaitableProcess::Create(const std::wstring& argv0,
   // Fixes https://github.com/bazelbuild/bazel/issues/8676
   return Create(argv0, argv_rest, env, wcwd, INVALID_HANDLE_VALUE,
                 INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, nullptr, true, true,
-                error);
+                nullptr, error);
 }
 
 bool WaitableProcess::Create(const std::wstring& argv0,
@@ -59,9 +59,11 @@ bool WaitableProcess::Create(const std::wstring& argv0,
                              const std::wstring& wcwd, HANDLE stdin_process,
                              HANDLE stdout_process, HANDLE stderr_process,
                              LARGE_INTEGER* opt_out_start_time,
-                             std::wstring* error) {
+                             std::wstring* error,
+                             HANDLE security_environment) {
   return Create(argv0, argv_rest, env, wcwd, stdin_process, stdout_process,
-                stderr_process, opt_out_start_time, false, false, error);
+                stderr_process, opt_out_start_time, false, false,
+                security_environment, error);
 }
 
 bool WaitableProcess::Create(const std::wstring& argv0,
@@ -70,6 +72,7 @@ bool WaitableProcess::Create(const std::wstring& argv0,
                              HANDLE stdout_process, HANDLE stderr_process,
                              LARGE_INTEGER* opt_out_start_time,
                              bool create_window, bool handle_signals,
+                             HANDLE security_environment,
                              std::wstring* error) {
   std::wstring cwd;
   std::wstring error_msg(AsShortPath(wcwd, &cwd));
@@ -137,7 +140,8 @@ bool WaitableProcess::Create(const std::wstring& argv0,
 
   std::unique_ptr<AutoAttributeList> attr_list;
   if (!AutoAttributeList::Create(stdin_process, stdout_process, stderr_process,
-                                 &attr_list, &error_msg)) {
+                                 &attr_list, &error_msg,
+                                 security_environment)) {
     *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
                               L"WaitableProcess::Create", L"", error_msg);
     return false;
