@@ -4,13 +4,13 @@ rem INTERACTIVE session (console or RDP), not from an SSH shell: in session 0
 rem every USER32-importing tool dies with STATUS_DLL_INIT_FAILED inside the
 rem container regardless of policy.
 rem
-rem Prerequisites: Windows 11 25H2 26200.9550 or later, MXC 1.0.0 (wxc-exec.exe
-rem next to BazelSandbox.exe), VS Build Tools with the C++ workload, bazelisk.
+rem Prerequisites: Windows 11 25H2 26200.9550 or later, the adapter built with
+rem `cargo build --release` one level up, VS Build Tools with the C++ workload, bazelisk.
 setlocal
-if "%ADAPTER%"=="" set ADAPTER=%~dp0..\BazelSandbox.exe
+if "%ADAPTER%"=="" set ADAPTER=%~dp0..\target\release\BazelSandbox.exe
 if "%VSROOT%"=="" set VSROOT=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 if "%KITS%"=="" set KITS=C:\Program Files (x86)\Windows Kits
-set SBX=--experimental_use_windows_sandbox=yes --experimental_windows_sandbox_path=%ADAPTER% --spawn_strategy=windows-sandbox --action_env=BAZEL_MXC_ENUM_CWD=1 --action_env=BAZEL_MXC_ENUM_ANCESTORS=1 --action_env=BAZEL_MXC_UI=1 "--action_env=BAZEL_MXC_EXTRA_RO=%VSROOT%;%KITS%"
+set SBX=--experimental_use_windows_sandbox=yes --experimental_windows_sandbox_path=%ADAPTER% --spawn_strategy=windows-sandbox "--action_env=BAZEL_MXC_EXTRA_RO=%VSROOT%;%KITS%"
 set NEG=//neg:undeclared_read //neg:undeclared_write //neg:network //neg:undeclared_tool
 set LEAK=C:\Users\Public\bazel-mxc-leak.txt
 cd /d "%~dp0"

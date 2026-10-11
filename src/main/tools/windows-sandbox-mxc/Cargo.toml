@@ -1,0 +1,13 @@
+[package]
+name = "bazel-sandbox-mxc"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "Bazel windows-sandbox runner backend on Microsoft Execution Containers (mxc-sdk, in-process)"
+
+[[bin]]
+name = "BazelSandbox"
+path = "src/main.rs"
+
+[dependencies]
+mxc-sdk = "1.0.0"
