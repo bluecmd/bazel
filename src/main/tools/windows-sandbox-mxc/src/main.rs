@@ -36,6 +36,7 @@
 //!   spawn and total milliseconds and the grant counts.
 //! * `BAZEL_MXC_DEBUG=1` (or `-D`) print the effective policy to stderr.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -137,10 +138,6 @@ fn key(p: &str) -> String {
     k
 }
 
-fn is_under(child: &str, dir: &str) -> bool {
-    let (c, d) = (key(child), key(dir));
-    c == d || (c.len() > d.len() && c.starts_with(&d) && (d.ends_with('\\') || c.as_bytes()[d.len()] == b'\\'))
-}
 
 /// `\\?\C:\x` -> `C:\x`; UNC targets are left out.
 fn canonical(p: &str) -> Option<String> {
@@ -172,10 +169,25 @@ fn dedupe(v: &mut Vec<String>) {
     v.retain(|p| seen.insert(key(p)));
 }
 
-/// Drop entries that are inside another entry of the same list.
+/// Drop entries that are inside another entry of the same list. Sorting the
+/// comparison keys puts every path right after the directories above it, so
+/// one pass suffices (the old pairwise check was quadratic and dominated the
+/// per-action cost once inputs reached the thousands).
 fn prune_nested(v: &mut Vec<String>) {
-    let snapshot = v.clone();
-    v.retain(|p| !snapshot.iter().any(|g| key(g) != key(p) && is_under(p, g)));
+    let mut keyed: Vec<(String, String)> = v.drain(..).map(|p| (key(&p), p)).collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut kept_dirs: Vec<String> = Vec::new();
+    for (k, p) in keyed {
+        let nested = kept_dirs
+            .last()
+            .map(|d| k.len() > d.len() && k.starts_with(d.as_str()) && (d.ends_with('\\') || k.as_bytes()[d.len()] == b'\\'))
+            .unwrap_or(false);
+        if nested {
+            continue;
+        }
+        kept_dirs.push(k);
+        v.push(p);
+    }
 }
 
 /// Windows command line from argv, per the CRT's parsing rules.
@@ -280,42 +292,37 @@ fn main() {
     prune_nested(&mut rw);
 
     // MXC applies the most restrictive intent to a path listed twice, so never
-    // enumerate a path some grant already covers.
-    let covered = |p: &str| ro.iter().chain(rw.iter()).any(|g| is_under(p, g));
+    // enumerate a path some grant already covers: a path is covered when it or
+    // one of its ancestors is a grant. For every grant (and the cwd) walk its
+    // ancestor chain top-down and enumerate the ancestors above the first grant.
+    let grant_keys: HashSet<String> = ro.iter().chain(rw.iter()).map(|g| key(g)).collect();
     let mut enumerate_paths: Vec<String> = Vec::new();
     if enumerate {
-        if !covered(&cwd) {
-            enumerate_paths.push(cwd.clone());
-        }
+        let mut seen: HashSet<String> = HashSet::new();
         for p in ro.iter().chain(rw.iter()).chain(std::iter::once(&cwd)) {
-            let mut anc: Option<&Path> = Path::new(p).parent();
-            while let Some(d) = anc {
+            let mut chain: Vec<&Path> = Vec::new();
+            let mut cur: Option<&Path> = if std::ptr::eq(p, &cwd) { Some(Path::new(p)) } else { Path::new(p).parent() };
+            while let Some(d) = cur {
+                if d.as_os_str().is_empty() {
+                    break;
+                }
+                chain.push(d);
+                cur = d.parent();
+            }
+            let mut covered = false;
+            for d in chain.into_iter().rev() {
                 let s = d.to_string_lossy();
-                if !s.is_empty() && !covered(&s) {
+                let k = key(&s);
+                if grant_keys.contains(&k) {
+                    covered = true;
+                }
+                if !covered && seen.insert(k) {
                     enumerate_paths.push(s.into_owned());
                 }
-                anc = d.parent();
             }
         }
-        dedupe(&mut enumerate_paths);
     }
 
-    // Bazel hands over argv[0] as it appears in the action, e.g.
-    // `external/+winsdk_configure+local_config_winsdk/rc_x64.bat`: relative and
-    // with forward slashes. CreateProcess finds the batch file, but the cmd.exe
-    // it starts for it parses the `/` as switches and fails with "'external' is
-    // not recognized". Bazel's local runner resolves argv[0] against the
-    // execroot first; do the same and use backslashes.
-    let mut argv = args.cmd.clone();
-    if let Some(first) = argv.first_mut() {
-        if first.contains(['\\', '/']) {
-            let p = Path::new(first.as_str());
-            let abs = if p.is_absolute() { p.to_path_buf() } else { Path::new(&cwd).join(p) };
-            if abs.exists() {
-                *first = abs.to_string_lossy().replace('/', "\\");
-            }
-        }
-    }
     let mut command = String::new();
     for (i, a) in argv.iter().enumerate() {
         if i > 0 {
