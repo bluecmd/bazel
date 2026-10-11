@@ -157,6 +157,70 @@ cost, plus ~1 ms per input. Parallelism hides most of the fixed cost; the
 per-input cost will hurt actions with thousands of inputs (large C++ link
 steps, JS bundles) unless inputs are granted by directory rather than by file.
 
+## Building Bazel itself: Windows MXC sandbox vs. local vs. Linux sandbox
+
+Workload: clean `bazel build //src:bazel-dev` of Bazel 9.3.0 from git (6 244
+actions on Windows, 4 959 on Linux), `--jobs=16`, host Bazel = 9.3.0 built from
+the same tree with the runner changes above (Windows) or the 9.3.0 release
+(Linux), server shut down and `bazel clean` before every run, JSON trace
+profile + compact execution log + memory profile + BEP written during the
+profiled runs. Order: sandbox, sandbox, local, local, sandbox, local, then one
+sandbox and one local run without profiling to check the profiler's own cost.
+Bash-based mnemonics (`Genrule`, `ProtocAuthenticityCheck`) run locally in all
+configurations. One machine per platform, nothing else running on it.
+
+Hardware: Windows 11 Enterprise 25H2 26200.9550 on a 16-thread Intel Xeon D
+class server, 64 GB; Linux (Talos, kernel 6.18) on a 16-thread Xeon D-1541
+2.1 GHz, 128 GB, as a privileged pod on a drained Kubernetes node.
+
+| configuration | wall time, s (runs in order) | mean | vs. local |
+|---|---|---|---|
+| Windows `--spawn_strategy=windows-sandbox` (MXC, per-file grants) | 3290, 3305, 3303 | 3299 | +59 % |
+| Windows `--spawn_strategy=local` | 2103, 2074, 2034 | 2070 | |
+| Linux `--spawn_strategy=linux-sandbox` | 1792, 1796, PENDING | | +1 % |
+| Linux `--spawn_strategy=local` | 1773, 1765, PENDING | | |
+
+Unprofiled check runs: PENDING.
+
+Per action (box, mean over the run; profile "action processing" spans):
+
+| mnemonic | count | Windows local | Windows MXC | Linux local | Linux sandbox |
+|---|---|---|---|---|---|
+| CppCompile | 1569 / 1582 | 7.6 s | 15.7 s | 7.5 s | 7.6 s |
+| Javac | 1023 / 1024 | 17.5 s | 22.4 s | 14.5 s | 14.7 s |
+| Turbine | 1010 | 1.0 s | 1.5 s | 0.5 s | 0.5 s |
+| StampJarManifest | 100 | 1.2 s | 4.1 s | 0.8 s | 0.9 s |
+| CppLink | 28 / 22 | 1.4 s | 3.5 s | 0.5 s | 0.5 s |
+
+Where the Windows overhead goes (adapter's own timer, 3 686 timed actions per run,
+three runs agree within 2 %):
+
+| phase | median | mean | total per run |
+|---|---|---|---|
+| adapter: build policy | 29 ms | 0.1 s | 0.4 k s |
+| MXC: create security environment + CreateProcess | 0.85 s | 2.6 s | 9.6 k s |
+| the action itself inside the container | 2.7 s | 8.0 s | 29.6 k s |
+
+The spawn cost is linear in the number of granted paths: a least-squares fit
+over the 11 058 timed actions of the three runs gives 0.2 s + 6.5 ms per read
+grant (5.5 ms per path when the enumerate-only ancestors are counted too),
+with 16 actions in flight. Medians per bucket: 0.5 s under 500 grants, 4.5 s
+at 500, 8.3 s at 1 000, 14.8 s at 2 000, 22 s above 2 500 (Javac actions have
+up to 6 700 inputs; 55 % of all actions have fewer than 250). The
+action itself also runs slower in the container: CppCompile about 2x, Javac
+about 1.3x, which is file-access mediation cost, not the adapter.
+
+Directory grants (`BAZEL_MXC_DIR_GRANTS=1`, measured on the 8-vCPU VM, same
+protocol, one run each): local 2818 s, per-file grants 4455 s (+58 %),
+directory grants 3853 s (+37 %). Spawn drops to a median of 0.26 s with
+~20 grants per action; what remains is the in-container slowdown of the
+actions themselves.
+
+For reference, the default strategies (persistent Javac workers) built the
+same tree in 1289 s on the VM against 2776 s with `--spawn_strategy=local`,
+i.e. losing workers costs more than the sandbox does, and `windows-sandbox`
+currently replaces the worker strategy for every mnemonic.
+
 ## Known limitations
 
 - **Junction/symlink creation inside the container is denied.** This is by
