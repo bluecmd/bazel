@@ -330,6 +330,27 @@ public final class SandboxModule extends BlazeModule {
           "windows-sandbox");
     }
 
+    // Process security environments created in-process (Windows 11 25H2 and later). Only
+    // registered under its own name: it is not a default.
+    if (OS.getCurrent() == OS.WINDOWS) {
+      String psecUnsupported = WindowsPsecSpawnRunner.checkSupport();
+      if (psecUnsupported == null) {
+        WindowsPsecSpawnRunner spawnRunner =
+            new WindowsPsecSpawnRunner(
+                cmdEnv,
+                sandboxBase,
+                options.getWindowsPsecPolicy(),
+                options.getWindowsSandboxReadonlyRoots(),
+                options.getWindowsPsecMaxIdleEnvironments(),
+                options.getSandboxDebug());
+        spawnRunners.add(spawnRunner);
+        builder.registerStrategy(
+            new WindowsPsecSandboxedStrategy(spawnRunner, executionOptions), "windows-psec");
+      } else {
+        logger.atInfo().log("windows-psec strategy unavailable: %s", psecUnsupported);
+      }
+    }
+
     if (processWrapperSupported
         || linuxSandboxSupported
         || darwinSandboxSupported
@@ -524,6 +545,13 @@ public final class SandboxModule extends BlazeModule {
     // `treeDeleter` might not be an AsynchronousTreeDeleter if the user changed the option but
     // then interrupted the build before the start of the execution phase. But that's OK, there
     // will be nothing new to delete. See #13240.
+
+    // No action runs any more, so the security environments can go.
+    for (SpawnRunner spawnRunner : spawnRunners) {
+      if (spawnRunner instanceof WindowsPsecSpawnRunner psecRunner) {
+        psecRunner.close();
+      }
+    }
 
     if (shouldCleanupSandboxBase) {
       boolean cleanupSucceeded = false;

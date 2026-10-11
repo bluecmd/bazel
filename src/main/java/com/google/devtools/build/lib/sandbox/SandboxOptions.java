@@ -27,6 +27,7 @@ import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters.BooleanConverter;
 import com.google.devtools.common.options.Converters.RegexPatternConverter;
 import com.google.devtools.common.options.Converters.TriStateConverter;
+import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -215,6 +216,68 @@ public abstract class SandboxOptions extends OptionsBase {
           "Path to the Windows sandbox binary to use when --experimental_use_windows_sandbox is"
               + " true. If a bare name, use the first binary of that name found in the PATH.")
   public abstract String getWindowsSandboxPath();
+
+  /** Policy granularity of the {@code windows-psec} strategy. */
+  public enum WindowsPsecPolicy {
+    /** One grant per declared input file; a new security environment for every action. */
+    PRECISE,
+    /**
+     * One grant per directory containing a declared input; environments are shared by actions with
+     * the same set of directories.
+     */
+    DIRECTORIES,
+    /**
+     * One grant per top-level directory of a source root, all of the output tree writable; very few
+     * distinct environments, shared by many actions.
+     */
+    COARSE;
+
+    /** Converts to {@link WindowsPsecPolicy}. */
+    public static class Converter extends EnumConverter<WindowsPsecPolicy> {
+      public Converter() {
+        super(WindowsPsecPolicy.class, "Windows PSEC sandbox policy");
+      }
+    }
+  }
+
+  @Option(
+      name = "experimental_windows_sandbox_readonly_root",
+      allowMultiple = true,
+      converter = OptionsUtils.AbsolutePathFragmentConverter.class,
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "A directory that actions run by the windows-psec strategy may read, in addition to their"
+              + " declared inputs. Use it for toolchains that live outside the execroot (Visual"
+              + " Studio, the Windows SDK, a JDK). Can be repeated.")
+  public abstract List<PathFragment> getWindowsSandboxReadonlyRoots();
+
+  @Option(
+      name = "experimental_windows_psec_policy",
+      converter = WindowsPsecPolicy.Converter.class,
+      defaultValue = "coarse",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "Granularity of the windows-psec sandbox policy. 'precise' grants each declared input"
+              + " file and creates a security environment per action (strictest, slowest);"
+              + " 'directories' grants the directories of the declared inputs and shares an"
+              + " environment between actions with the same directories; 'coarse' grants the"
+              + " top-level source directories that hold declared inputs, all external"
+              + " repositories and the whole output tree (writable), so a handful of"
+              + " environments serve the whole build.")
+  public abstract WindowsPsecPolicy getWindowsPsecPolicy();
+
+  @Option(
+      name = "experimental_windows_psec_max_idle_environments",
+      defaultValue = "32",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "Number of unused process security environments the windows-psec strategy keeps for"
+              + " reuse by later actions with the same policy.")
+  public abstract int getWindowsPsecMaxIdleEnvironments();
 
   public ImmutableSet<Path> getInaccessiblePaths(FileSystem fs) {
     List<Path> inaccessiblePaths = new ArrayList<>();

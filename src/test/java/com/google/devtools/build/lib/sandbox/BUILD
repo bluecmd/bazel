@@ -56,6 +56,8 @@ java_test(
             "SandboxModuleTest.java",
             "SandboxOptionsTest.java",
             "SymlinkedSandboxedSpawnTest.java",
+            "WindowsPsecEnvironmentPoolTest.java",
+            "WindowsPsecPolicyBuilderTest.java",
         ],
     test_class = "com.google.devtools.build.lib.AllTests",
     runtime_deps = [
@@ -76,6 +78,7 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib/sandbox:sandbox_options",
         "//src/main/java/com/google/devtools/build/lib/sandbox:sandboxed_spawns",
         "//src/main/java/com/google/devtools/build/lib/sandbox:tree_deleter",
+        "//src/main/java/com/google/devtools/build/lib/sandbox:windows_psec_sandbox",
         "//src/main/java/com/google/devtools/build/lib/vfs",
         "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
         "//src/main/java/com/google/devtools/build/lib/vfs/inmemoryfs",

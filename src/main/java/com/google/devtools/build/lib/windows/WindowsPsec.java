@@ -85,7 +85,8 @@ public final class WindowsPsec {
             allowNetwork,
             error);
     if (handle == 0) {
-      throw new IOException(error[0] != null ? error[0] : "CreateProcessSecurityEnvironment failed");
+      throw new IOException(
+          error[0] != null ? error[0] : "CreateProcessSecurityEnvironment failed");
     }
     return handle;
   }
