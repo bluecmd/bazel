@@ -1,0 +1,33 @@
+# Actions that must FAIL under --spawn_strategy=windows-sandbox and succeed
+# with --spawn_strategy=local. All paths are independent of where the example
+# is checked out: `secret.txt` and `tools\` are reached through the execroot
+# symlink forest without being declared as inputs; the leak file goes to the
+# machine-wide Public profile.
+genrule(
+    name = "undeclared_read",
+    outs = ["undeclared_read.txt"],
+    cmd_bat = "type secret.txt > $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "undeclared_write",
+    outs = ["undeclared_write.txt"],
+    cmd_bat = "echo leak > C:\\Users\\Public\\bazel-mxc-leak.txt && echo ok > $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "network",
+    outs = ["network.txt"],
+    cmd_bat = "curl.exe -sS -m 15 -o NUL -w %%{http_code} https://api.github.com > $@",
+    tags = ["manual"],
+)
+
+# run.cmd copies whoami.exe into tools\ first; the genrule does not declare it.
+genrule(
+    name = "undeclared_tool",
+    outs = ["undeclared_tool.txt"],
+    cmd_bat = "tools\\whoami.exe > $@",
+    tags = ["manual"],
+)

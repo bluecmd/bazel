@@ -1,0 +1,13 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+genrule(
+    name = "gen",
+    srcs = ["in.txt"],
+    outs = ["gen.txt"],
+    cmd_bat = "type $(location in.txt) > $@ && echo generated >> $@",
+)
+
+cc_binary(
+    name = "hello",
+    srcs = ["hello.c"],
+)

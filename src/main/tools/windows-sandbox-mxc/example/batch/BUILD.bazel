@@ -1,0 +1,6 @@
+# 40 trivial actions for measuring per-action sandbox overhead.
+[genrule(
+    name = "g%d" % i,
+    outs = ["g%d.txt" % i],
+    cmd_bat = "echo %d > $@" % i,
+) for i in range(40)]
