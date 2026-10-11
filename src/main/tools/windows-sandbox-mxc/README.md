@@ -182,10 +182,31 @@ steps, JS bundles) unless inputs are granted by directory rather than by file.
 - Tested only with Bazel 9.1.1/9.3.0 and a toy workspace. No Java, no Python,
   no tests (`bazel test`) yet.
 
+## Bazel-side changes on this branch
+
+Building Bazel itself (`//src:bazel-dev.exe`, ~6 200 actions) under
+`--spawn_strategy=windows-sandbox` needed three changes to the runner, all in
+`src/main/java/com/google/devtools/build/lib/sandbox/`:
+
+- **Params file.** The runner passed every input as `-r <path>` on the command
+  line; Javac actions with thousands of inputs exceed `CreateProcessW`'s 32 767
+  character limit ("command is longer than CreateProcessW's limit"). The
+  `-w/-r/-b` arguments are now written to `<tmpdir>/params` and passed as
+  `@<file>` when the estimated command line exceeds 30 000 characters. The
+  adapter expands `@file` (one argument per line).
+- **Null inputs.** `SandboxInputs.getFiles()` maps empty virtual inputs to
+  `null`; the runner dereferenced them and crashed the server (NPE) on a
+  `rules_jvm_external` action. They are skipped now.
+- **Temp directory cleanup.** `WindowsSandboxedSpawn.delete()` was empty, so the
+  per-action `windows-sandbox.*` directories under the execroot were never
+  removed. The spawn now deletes its directory.
+
+The genrules of Bazel's own build use bash, which cannot run under MXC (issue
+1061), so the measurements below use `--strategy=Genrule=local`.
+
 ## Possible Bazel-side follow-ups
 
-None of these were needed for the experiment, but they would turn it into a
-supportable feature:
+Beyond the changes above, these would turn it into a supportable feature:
 
 1. Pass the execroot explicitly (`-W`) and the toolchain roots (new flag) to
    the sandbox binary, instead of relying on the adapter's cwd and `--action_env`.
