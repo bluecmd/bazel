@@ -2,6 +2,36 @@
 
 **Title:** Process container: environment creation costs ~1 ms per granted path in `GetVolumePathNameW`
 
+## Call path
+
+Every MXC process container goes through this path once per container; the
+cost described here is in the last four lines and is paid once per granted
+path (`readOnlyPaths`, `readWritePaths`, `denyPaths`, `enumeratePaths`):
+
+```text
+mxc-sdk  BaseContainerRunner (builds the PSEC FlatBuffer from the ContainerConfig)
+└─ secenv::ProcessSecurityEnvironment::new
+   └─ processmodel!CreateProcessSecurityEnvironment            [client process]
+      └─ processmodel!AicCreateProcessSecurityEnvironment        RPC (ncalrpc) to AppInfo
+         ═══════════════════════════════════════════════════════ process boundary
+         appinfo!RAiCreateProcessSecurityEnvironment             [svchost -k netsvcs -s Appinfo]
+         └─ processmodel!SbeCreateProcessSecurityEnvironment
+            └─ processmodel!SbepCreateSandbox
+               └─ SandboxFilesystem::ApplyFilesystemPolicy        96 % of the broker's CPU
+                  ├─ SandboxFilesystem::EnsureBfsAttachedForPaths 73 %  for each path:
+                  │  └─ KernelBase!GetVolumePathNameW                   for each prefix of the path:
+                  │     ├─ GetDriveTypeW                                  2 × NtOpenFile + NtQueryVolumeInformationFile
+                  │     ├─ BasepGetVolumeNameFromReparsePoint             NtCreateFile + FSCTL_GET_REPARSE_POINT
+                  │     └─ GetVolumeNameForRoot                           NtOpenFile + IOCTL_MOUNTDEV_QUERY_DEVICE_NAME
+                  └─ SandboxFilesystem::ApplyFilesystem             20 %  for each path:
+                     ├─ GetFileAttributesExW                              NtQueryFullAttributesFile
+                     └─ NtDeviceIoControlFile(\Device\Bfs, 0x228004)      policy insert (+ policy-store writes)
+```
+
+(Percentages from a kernel trace of a 300-path creation, user frames
+resolved with the public symbols of `appinfo.dll`, `processmodel.dll` and
+`KernelBase.dll`.)
+
 ## Summary
 
 `CreateProcessSecurityEnvironment` (PSEC contract 1.1, Windows 11 25H2
