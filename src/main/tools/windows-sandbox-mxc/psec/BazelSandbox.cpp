@@ -150,7 +150,12 @@ std::wstring Parent(const std::wstring& p) {
   return k.substr(0, pos);
 }
 
-DWORD Attrs(const std::wstring& p) { return GetFileAttributesW(p.c_str()); }
+// Paths in Bazel's tree exceed MAX_PATH (maven artifacts under the repository
+// contents cache); the \\?\ prefix makes the Win32 calls take them.
+std::wstring LongPath(const std::wstring& p) {
+  return IsAbsolute(p) && p.compare(0, 4, L"\\\\?\\") != 0 && p.compare(0, 2, L"\\\\") != 0 ? L"\\\\?\\" + Backslashes(p) : p;
+}
+DWORD Attrs(const std::wstring& p) { return GetFileAttributesW(LongPath(p).c_str()); }
 bool Exists(const std::wstring& p) { return Attrs(p) != INVALID_FILE_ATTRIBUTES; }
 bool IsDir(const std::wstring& p) {
   DWORD a = Attrs(p);
@@ -755,11 +760,17 @@ int wmain(int argc, wchar_t** argv) {
     else QuoteArg(cmdline, argvv[i]);
   }
 
+  // A grant longer than MAX_PATH only takes effect when it carries the \\?\
+  // prefix (processmodel.dll does not resolve plain long paths; see
+  // GAPS-all-actions-sandboxed.md, gap 13). Short paths are passed plain.
+  auto specPath = [](const std::wstring& p) {
+    return ToUtf8(p.size() >= 248 ? LongPath(p) : p);
+  };
   Spec spec;
-  for (const auto& p : pol.rw) spec.read_write.push_back(ToUtf8(p));
-  for (const auto& p : pol.ro) spec.read_only.push_back(ToUtf8(p));
-  for (const auto& p : pol.deny) spec.deny.push_back(ToUtf8(p));
-  for (const auto& p : pol.enumerate) spec.enumerate.push_back(ToUtf8(p));
+  for (const auto& p : pol.rw) spec.read_write.push_back(specPath(p));
+  for (const auto& p : pol.ro) spec.read_only.push_back(specPath(p));
+  for (const auto& p : pol.deny) spec.deny.push_back(specPath(p));
+  for (const auto& p : pol.enumerate) spec.enumerate.push_back(specPath(p));
   spec.disallow_win32k = !ui;
   if (auto m = GetEnv(L"BAZEL_PSEC_UI_MASK")) spec.ui_restrictions = wcstoull(m->c_str(), nullptr, 16);
   spec.allow_network = EnvSet(L"BAZEL_PSEC_NET");
