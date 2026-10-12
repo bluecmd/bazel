@@ -25,8 +25,9 @@ command that reproduces it.
 | today: `windows-sandbox` + native exe, `Genrule` and `ProtocAuthenticityCheck` local (box, `--jobs=16`, directory grants) | **builds**: 6 244 processes = 1 384 internal, 138 local, 4 768 `windows-sandbox`; 2 825 s wall (the Rust MXC adapter with directory grants took 2 866 s on the same box, `local` 2 022-2 070 s) |
 | every action through `windows-sandbox`, git-bash as the shell (VM) | 1 536 actions sandboxed, then 117 `Genrule`/`ProtocAuthenticityCheck` actions fail (git-bash dies at start), 1 `local = 1` genrule refused, 1 `cmd_bat` genrule failed (adapter bug, fixed); everything downstream of the bash genrules (~3 000 actions, all of the Java tree) never runs |
 | every action through `windows-sandbox`, busybox-w32 as the genrule shell (box, `--jobs=16`, long-path exe) | 3 623 processes (2 253 sandboxed) in 955 s, then stops at 6 229 of 6 244 with 8 failing actions: 2 `sh_binary` tools whose launcher runs git-bash (`minimize_jdk`, `zip_builtins`), 5 genrules whose last command is killed because busybox does not wait for it (4.7), the `local = 1` genrule |
+| **… plus the knobs through `--host_action_env` too (box, `--jobs=16`): the final state** | **6 238 of 6 244 actions done, 4 897 `windows-sandbox` + 1 387 internal, 0 local, 2 944 s** (vs 2 825 s with 138 local bash actions). 3 actions remain: `//tools/osx:xcode-locator-genrule` (`local = 1`), `//src:embedded_jdk_allmodules` (`minimize_jdk.sh` needs bash proper, 4.8), protobuf's `ProtocAuthenticityCheck` (a `run_shell` action without `use_default_shell_env`, so it gets no `--action_env` at all and the shell directory is not granted, gap 20) |
 | … plus busybox as the sh toolchain (`--repo_env=BAZEL_SH`) and the confined trampoline (box) | 3 624 processes (2 253 sandboxed) in 1 020 s, stops at 6 229: `zip_builtins` now passes; `minimize_jdk.sh` fails under busybox's ash (the bash runfiles bootstrap `source "${RUNFILES_DIR:-/dev/null}/$f" \|\| …` makes a POSIX shell exit, 4.8); fastutil + 4 upb genrules still fail at `$(…)` ("unable to spawn shell", 4.7); the `local = 1` genrule |
-| `bazel test` of a cc/java/py/sh test each, sandboxed | cc, java, py **pass** (runfiles manifest, `TEST_TMPDIR`, undeclared outputs, zipped `py_test`); `sh_test` fails: its launcher runs git-bash (gap 18) |
+| `bazel test` of a cc/java/py/sh test each, sandboxed | cc, java, py **pass** (runfiles manifest, `TEST_TMPDIR`, undeclared outputs, zipped `py_test`); `sh_test` fails with git-bash as the sh toolchain (gap 18) and **passes** with busybox as the sh toolchain plus the trampoline (`tests2.cmd`: 4 of 4) |
 
 The one blocker that matters is **the MSYS runtime (git-bash) cannot start
 inside a process security environment**, and the reason is now exact: the
@@ -109,12 +110,13 @@ with no exclusions. Counts are from the 9.3.0 tree on Windows (`aquery`).
 | 10 | network-requiring actions (`requires-network` tag) | 0 | always denied | the Windows runner never passes a network intent; the exe can allow egress per action (`BAZEL_PSEC_NET`) | **b** | plumb `requires-network` / `--sandbox_default_allow_network` into `WindowsSandboxUtil` (new `-N` flag) | hours |
 | 11 | toolchain roots outside the execroot (MSVC, Windows Kits; a local JDK/Python/node) | every C++ action | work via `--action_env=BAZEL_MXC_EXTRA_RO` | not declared inputs | **b** | a repeatable `--experimental_windows_sandbox_readonly_root` (exists on the JNI branch) emitted as `-r` | hours |
 | 12 | the shell executable and its directory (`--shell_executable`, `BAZEL_SH`): MSYS forks by re-executing `bash.exe`, busybox spawns itself for `$(…)`/pipes, PATH tools live next to it | every bash genrule | busybox: "unable to spawn shell" for `$(dirname …)` | the shell is argv[0], not an input; only the first process is created by the unconfined exe | **b** | grant the shell's directory (and the `usr\bin`/`bin` directories Bazel puts on PATH) read-only; today: add them to `BAZEL_MXC_EXTRA_RO` | hours |
-| 13 | busybox-w32 as the shell (`--shell_executable`) | 117 | TBD_EXE5 | busybox is a plain Win32 program and starts fine in the environment; its own gaps: `MAX_PATH` (needs `LongPathsEnabled=1` **and** a `longPathAware` manifest, which the stock exe lacks: `cp` of the long maven paths fails with "can't stat"), no `zip` applet (`zip -qd` in `//third_party:filter_netty_dynamic_libs` and `fastutil_stripped_jar`: a native Info-ZIP is needed on PATH), no `locale` (`minimize_jdk.sh`), the bash runfiles library (`runfiles.bash`) is not ash-compatible | **d** | ship a long-path-aware busybox + native zip next to it; fix the two scripts, or keep `sh_binary` tools on git-bash until gap 1 is closed | hours |
+| 13 | busybox-w32 as the shell (`--shell_executable`) | 117 | works for 136 of the 138 bash actions once the items in this row, the trampoline (4.7) and gap 20 are in place; `minimize_jdk.sh` (4.8) and `ProtocAuthenticityCheck` (gap 20) remain | busybox is a plain Win32 program and starts fine in the environment; its own gaps: `MAX_PATH` (needs `LongPathsEnabled=1` **and** a `longPathAware` manifest, which the stock exe lacks: `cp` of the long maven paths fails with "can't stat"), no `zip` applet (`zip -qd` in `//third_party:filter_netty_dynamic_libs` and `fastutil_stripped_jar`: a native Info-ZIP is needed on PATH), no `locale` (`minimize_jdk.sh`), the bash runfiles library (`runfiles.bash`) is not ash-compatible | **d** | ship a long-path-aware busybox + native zip next to it; fix the two scripts, or keep `sh_binary` tools on git-bash until gap 1 is closed | hours |
 | 14 | persistent workers (`Javac`, `Turbine`, …) | 2 028 | run **unsandboxed** under the default strategy; `--spawn_strategy=windows-sandbox` disables them (and doubles build time) | no sandboxed-worker support on Windows (`SandboxedWorker` only knows the Linux/Darwin sandboxes) | **b** | start worker processes through the same attach path with a fixed per-worker policy (worker execroot read-write, toolchain roots read-only); the handle can be attached to a long-lived process, environments are reusable (JNI branch) | days |
 | 15 | USER32 importers from session 0 (ssh, services) | every `cl.exe`, `java.exe`, … | die with `STATUS_DLL_INIT_FAILED` | interactive window station required (MXC #1465) | **a** | run Bazel from an interactive session (autologon + scheduled task with `/it`) | — |
 | 16 | internal actions (`Symlink`, `SymlinkTree`, `RunfilesTree`, `FileWrite`, `TemplateExpand`, `SourceSymlinkManifest`, `RepoMappingManifest`) | 2 893 | run in the server, nothing to sandbox | — | — | — | — |
 | 17 | `cc_test`, `java_test`, `py_test` under `bazel test` (runfiles manifest, `TEST_TMPDIR`, undeclared outputs, zipped `py_test`) | — | pass with the runfiles-rw exe (failed before, gap 5) | — | **c** fixed | — | done |
 | 18 | `sh_test` / `sh_binary` launchers | — | fail: the launcher runs the sh toolchain's bash (`BAZEL_SH` at repository-fetch time, Git's MSYS bash), whatever `--shell_executable` says | gap 1 again; `--shell_executable` does not reach `local_config_sh` | **b**/**d** | `--repo_env=BAZEL_SH=<busybox>` for the toolchain, or the MSYS fix | minutes / gap 1 |
+| 20 | the adapter's knobs travel as environment variables (`--action_env=BAZEL_MXC_EXTRA_RO=…` etc.) | every exec-configuration (`[for tool]`) action | the toolchain roots, directory grants and trampoline silently do not apply to `[for tool]` actions: `--action_env` is target-configuration only, exec-configuration actions take `--host_action_env` (`CoreOptions`); this is what made the four upb bootstrap genrules and `fastutil_stripped_jar [for tool]` fail ("unable to spawn shell": busybox cannot stat its own image, `CreateFile C:\mxc\psecexe\tools\bash.exe` → `ACCESS DENIED` in the trace) while identical target-configuration genrules passed | `--action_env` semantics | **b** | the runner gets proper flags (gap 11, 12) instead of `--action_env`; until then pass every knob through both `--action_env` and `--host_action_env` | minutes |
 | 19 | the action's temp directory | every action | the user's shared `%TEMP%` is granted read-write to every action | `WindowsLocalEnvProvider` keeps the client's `TMP`/`TEMP` and `getWritableDirs` grants it; the per-action `windows-sandbox.<n>\work` directory is only used when the client has no `TMP` | **b** | set `TMP`/`TEMP`/`TMPDIR` to the per-action directory, as the JNI branch does (`<output_base>\psec\<n>`, short on purpose) | hours |
 
 Notes on the counts: 6 244 actions in the build; 2 893 are internal
@@ -352,14 +354,20 @@ a security environment through the native exe, and the build succeeds. The
 remaining 138 spawns are bash, and they all hinge on one thing: a shell that
 starts inside an AppContainer.
 
-1. **Now, without touching Bazel or Windows (hours):** busybox-w32 as the
-   shell for genrules *and* for the sh toolchain
+1. **Now, without touching Bazel or Windows (hours, done here):** busybox-w32
+   as the shell for genrules *and* for the sh toolchain
    (`--shell_executable=…\bash.exe --repo_env=BAZEL_SH=…\bash.exe`, a
    `longPathAware` busybox, a native `zip.exe` next to it, the shell
-   directory in the read-only roots), `local = 1` removed from the
-   xcode-locator genrule, `cmd_ps` without `Set-ExecutionPolicy`. What this
-   leaves: scripts that need bash proper (TBD_BUSYBOX_RESIDUE). Those few
-   stay `--strategy=<mnemonic>=local` or get rewritten.
+   directory in the read-only roots, the trampoline, every knob through
+   `--action_env` and `--host_action_env`). Result: **4 897 of 4 900
+   spawns sandboxed**, the build runs to 6 238 of 6 244 actions in 2 944 s
+   on the box (4 % more than with the 138 bash actions local). What is
+   left: `minimize_jdk.sh` (needs bash's `source … ||` semantics, 4.8),
+   protobuf's `ProtocAuthenticityCheck` (no `use_default_shell_env`, so no
+   grants reach it; one line in `protoc_authenticity.bzl` or the runner
+   flags of item 3), and the `local = 1` genrule. Each is a one-line change
+   in the tree or in the rule; until then `--strategy=<mnemonic>=local` for
+   exactly those.
 2. **The real fix (days, in the toolchain):** the MSYS runtime made
    AppContainer-aware (section 4.1), so git-bash, `sh_binary`, `sh_test` and
    every `cmd` genrule run unchanged. This is a contained change to
