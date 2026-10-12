@@ -35,6 +35,7 @@ ap.add_argument('--etl-parser', required=True, help='site-packages directory hol
 ap.add_argument('--modules', help='modules.txt: "<name> <base-hex> <size-hex>" per line (from `lm`)')
 ap.add_argument('--bfs-funcs', help='bfs-funcs.txt: "<rva-start> <rva-end> <name>" per line')
 ap.add_argument('--symbols', action='append', default=[], help='"<addr-hex>  <symbol>" lines (ln output)')
+ap.add_argument('--user-symbols', action='append', default=[], help='<module>=<file> with "<rva-start> <rva-end> <name>" lines (IDA export) for user-mode frames')
 ap.add_argument('--qpc-hz', type=float, default=10e6, help='QPC frequency of the trace clock')
 ap.add_argument('--focus', default='nttest.exe,BazelSandbox.exe,svchost.exe:Appinfo',
                 help='comma list of image[:cmdline-substring]; these processes get syscall/FileIo/sample detail')
@@ -72,6 +73,41 @@ for fn in args.symbols:
         if m:
             symtab[int(m.group(1).replace('`', ''), 16)] = m.group(2)
 
+user_funcs = {}        # module name (lower) -> sorted [(rva_start, rva_end, name)]
+for spec in args.user_symbols:
+    mod, _, fn = spec.partition('=')
+    lst = []
+    for line in open(fn):
+        p = line.split(None, 2)
+        if len(p) == 3:
+            try: lst.append((int(p[0], 16), int(p[1], 16), p[2].strip()))
+            except ValueError: pass
+    user_funcs[mod.lower()] = sorted(lst)
+user_images = collections.defaultdict(list)   # pid -> sorted [(base, size, name)]
+def user_module_of(pid, addr):
+    lst = user_images.get(pid)
+    if not lst: return None
+    lo, hi = 0, len(lst)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if lst[mid][0] + lst[mid][1] <= addr: lo = mid + 1
+        elif lst[mid][0] > addr: hi = mid
+        else: return lst[mid]
+    return None
+def symbolize_user(pid, addr):
+    m = user_module_of(pid, addr)
+    if not m: return 'user 0x%x' % addr
+    rva = addr - m[0]; name = m[2]
+    fl = user_funcs.get(name.lower())
+    if fl:
+        lo, hi = 0, len(fl)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if fl[mid][1] <= rva: lo = mid + 1
+            elif fl[mid][0] > rva: hi = mid
+            else: return '%s!%s+0x%x' % (name, fl[mid][2], rva - fl[mid][0])
+    return '%s+0x%x' % (name, rva)
+
 def module_of(addr):
     lo, hi = 0, len(modules)
     while lo < hi:
@@ -81,7 +117,9 @@ def module_of(addr):
         else: return modules[mid]
     return None
 
-def symbolize(addr):
+def symbolize(addr, pid=-1):
+    if addr < 0x800000000000:
+        return symbolize_user(pid, addr)
     if addr in symtab:
         return symtab[addr]
     m = module_of(addr)
@@ -166,6 +204,9 @@ for ch in f.chunks:
                 n = (len(b) - 16) // 8
                 frames = struct.unpack_from('<%dQ' % n, b, 16)
                 events.append((ts, seq, cpu, 'stack', ets, spid, stid, frames))
+            elif g == 'EVENT_TRACE_GROUP_IMAGE' and t in (3, 10):
+                ibase, isize, ipid = struct.unpack_from('<QQI', b, 0)
+                user_images[ipid].append((ibase, isize, wstr(b, 56)[0].rsplit('\\', 1)[-1]))
             elif g == GROUP_PROCESS and t in (3, 4):
                 pid, img, cmd = parse_process(b)
                 proc_name.setdefault(pid, img); proc_cmd.setdefault(pid, cmd)
@@ -180,6 +221,9 @@ for ch in f.chunks:
             elif g == GROUP_THREAD and t in (1, 2, 3, 4):
                 p, th = struct.unpack_from('<II', b, 0)
                 thread_pid[th] = p
+            elif (g == GROUP_PROCESS and t == 10) or (g == 'EVENT_TRACE_GROUP_IMAGE' and t in (3, 10)):
+                ibase, isize, ipid = struct.unpack_from('<QQI', b, 0)
+                user_images[ipid].append((ibase, isize, wstr(b, 56)[0].rsplit('\\', 1)[-1]))
             elif g == GROUP_PROCESS and t in (1, 2):
                 p, img, cmd = parse_process(b)
                 proc_name.setdefault(p, img); proc_cmd.setdefault(p, cmd)
@@ -189,6 +233,7 @@ for ch in f.chunks:
                 thread_name[th] = wstr(b, 8)[0]
 
 events.sort(key=lambda e: (e[0], e[1]))
+for pid in user_images: user_images[pid] = sorted(set(user_images[pid]))
 t0 = events[0][0]
 tick_us = 1e6 / args.qpc_hz
 def us(ts):
@@ -338,7 +383,7 @@ for e in events:
         pid = thread_pid.get(tid, -1)
         if pid not in focus or tid == 0: continue
         out.append({'ph': 'i', 's': 't', 'pid': pid, 'tid': tid, 'ts': us(ts), 'cat': 'sample',
-                    'name': symbolize(ip), 'args': {'ip': '0x%x' % ip}})
+                    'name': symbolize(ip, pid), 'args': {'ip': '0x%x' % ip}})
         last_sample[(tid, ts)] = len(out) - 1
         stats['samples'] += 1
     elif kind == 'stack':
@@ -347,8 +392,9 @@ for e in events:
         if i is None: continue
         # kernel and user parts of one sample arrive as two StackWalk events with the same timestamp
         a = out[i]['args']
-        a['stack'] = a.get('stack', []) + [symbolize(fr) for fr in frames]
-        a['stack_leaf_kernel'] = next((f for f in a['stack'] if not f.startswith('user ')), '')
+        a['stack'] = a.get('stack', []) + [symbolize(fr, spid) for fr in frames]
+        a['stack_leaf_kernel'] = next((f for f in a['stack'] if f.split('!')[0].split('+')[0] in ('nt', 'bfs', 'fltmgr', 'ntfs', 'luafv', 'wdfilter', 'fileinfo', 'wof')), '')
+        a['stack_user_top'] = next((f for f in a['stack'] if '!' in f and not f.lower().startswith(('ntdll', 'kernelbase', 'kernel32')) and f.split('!')[0].split('+')[0] not in ('nt', 'bfs', 'fltmgr', 'ntfs', 'luafv', 'wdfilter', 'fileinfo', 'wof')), '')
     elif kind == 'process':
         t, p, img = e[4:]
         out.append({'ph': 'i', 's': 'p', 'pid': p, 'tid': 0, 'ts': us(ts), 'cat': 'process',

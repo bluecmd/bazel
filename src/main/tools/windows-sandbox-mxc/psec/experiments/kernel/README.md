@@ -20,3 +20,4 @@ the guest's kernel module map from `lm`.
 | `psec-trace.perfetto.json.gz` | the converted trace (section 4.9.3); open at https://ui.perfetto.dev |
 | `symbols-ln.txt` | kernel addresses of the trace's syscall entry points and sample frames, resolved with `ln` on the target |
 | `tracecheck.py`, `timeline.py`, `brokerseq.py` | sanity checks and the numbers quoted in 4.9.3 (syscall pairing, CPU per 50 ms, the broker's per-path sequence) |
+| `usersyms/*.funcs`, `brokerusr.py` | function tables (RVA start, end, name) of `appinfo.dll`, `processmodel.dll`, `KernelBase.dll` from their public PDBs, used by `etw2perfetto.py --user-symbols` and by `brokerusr.py` (which user functions issue the broker's opens, section 4.9.4) |

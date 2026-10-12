@@ -534,6 +534,73 @@ The create that the caller asked for starts 198 µs into the call and takes
 now with its timing. The `NtClose` of the handle afterwards costs 34 µs
 median (2 µs unsandboxed), the second pass through the filter stack.
 
+### 4.9.4 What the AppInfo service does per path (`processmodel.dll`, reversed)
+
+The trace's user-mode frames resolve against the service's loaded images
+(image-load events) and the public symbols of `appinfo.dll`,
+`processmodel.dll` and `KernelBase.dll` (`usersyms/`, function tables
+exported from IDA with the Microsoft PDBs). The RPC lands in
+`appinfo!RAiCreateProcessSecurityEnvironment`, which calls
+`processmodel!SbeCreateProcessSecurityEnvironment` → `SbepCreateSandbox` →
+`SandboxFilesystem::ApplyFilesystemPolicy`. That is 96 % of the service's
+samples during the creation, and `ApplyFilesystemPolicy` is two plain
+sequential loops over the grant vectors (read-only, read-write, deny,
+enumerate):
+
+| phase | function | share of broker CPU | what it does per path |
+|---|---|---|---|
+| 1 (204 – 424 ms) | `SandboxFilesystem::EnsureBfsAttachedForPaths` | 73 % | `GetVolumePathNameW(path)` to learn the path's volume, `MakeVolumeKey`, and only for a volume not seen before `GetVolumeInformationW` and, if it is not NTFS, `EnsureBfsAttachedToVolume`. The per-volume set caches the second half; the `GetVolumePathNameW` call is made for every path. |
+| 2 (424 – 483 ms) | `SandboxFilesystem::ApplyFilesystem` | 20 % | opens `\\.\GLOBALROOT\Device\Bfs` once, impersonates the user, then per path `CheckIfFileOrDirectory` = `GetFileAttributesExW` (`NtQueryFullAttributesFile`, 54 µs median) and the set-policy IOCTL `0x228004` with kind 1/2/4/6 (130 µs mean, the in-kernel insert with the policy-store writes of 4.9.2 A). An `ERROR_ACCESS_DENIED` is retried with `CheckFileAccessRights` under a duplicated token. |
+
+`GetVolumePathNameW` (`KernelBase!GetVolumePathNameInternalW`) is where the
+58 system calls per path come from. It exists to find the deepest mount
+point on a path, so it loops over the path's prefixes from the full path
+upward, and on every prefix it probes three ways, each an open through the
+whole filter stack (Defender's `wdfilter`, `luafv`, `fileinfo`, `bfs`,
+`ntfs`) plus an `NtClose` of 11 µs:
+
+| helper | system calls on each prefix | outcome in the trace |
+|---|---|---|
+| `GetDriveTypeW` | `NtOpenFile(0x60)` then `NtOpenFile(0x20)` + `NtQueryVolumeInformationFile(FileFsDeviceInformation)` | `c00000ba` for directories, then `DRIVE_FIXED` |
+| `BasepGetVolumeNameFromReparsePoint` | `CreateFile(prefix\, OPEN_REPARSE_POINT)` + `FSCTL_GET_REPARSE_POINT` (`0x900a8`) | `c0000275` STATUS_NOT_A_REPARSE_POINT |
+| `GetVolumeNameForRoot` | `NtOpenFile(0x10)` + `IOCTL_MOUNTDEV_QUERY_DEVICE_NAME` (`0x4d0008`) | `c000000d` below the root; at `C:\` the `\\.\MountPointManager` open and the size-query / query IOCTL pair |
+
+For `C:\kd\files\d000\f00131.txt` that is five prefixes, 13 `NtOpenFile`, 8
+`NtCreateFile`, 6 `NtFsControlFile`, 7 `NtDeviceIoControlFile`, 17
+`NtClose`: 0.73 ms of the 0.93 ms per path, and it grows with the depth of
+the path (a Bazel execroot path has 10 – 14 components, which is where the
+3.8 s for 4 000 grants in 4.9.2 A comes from). All 300 grants here share the
+same three ancestors; nothing is remembered between them.
+
+**Why it is slow:** not the kernel policy and not `bfs.sys`, but a
+volume-detection call made once per granted path, whose cost is linear in
+the path depth and paid through the filter stack. **Why it is sequential:**
+the RPC is asynchronous on the wire (`RpcAsyncCompleteCall`), but the
+server routine runs the whole creation synchronously on one RPC worker
+thread, and the two loops are plain `for` loops with no parallelism and no
+cache across paths. Concurrent `CreateProcessSecurityEnvironment` calls
+from different processes do run on different RPC threads, so Bazel's
+parallel actions overlap their creations, but a single creation is one
+thread doing 58 system calls per grant.
+
+**What would fix it (Microsoft's side):** remember the volume of a parent
+directory once it is known (a string prefix lookup, or a single
+`NtQueryVolumeInformationFile(FileFsVolumeInformation)` on the handle that
+`GetFileAttributesExW` already opens in phase 2), or skip the volume
+detection altogether for the drive-letter paths that are the common case;
+and turn on `BfsInMemoryPolicies`, which `ApplyFilesystem` already supports
+(IOCTL `0x228014`), to drop the policy-store writes from phase 2. Either of
+the first two removes ~75 % of the creation cost without touching the
+driver.
+
+**Our side:** the client's own 60 ms before the RPC (BazelSandbox.exe,
+100 – 185 ms in the trace) is `FinalPath()`: `CreateFileW` +
+`GetFinalPathNameByHandleW` per grant to resolve symlinks and junctions,
+0.2 ms per path. Resolving each grant's parent directory once, or only
+grants that live under a known junction, would remove most of it. Beyond
+that, the levers are the ones already in section 5: fewer grants (directory
+grants) and environment pooling.
+
 ## 5. Fixes, by class
 
 **c, in the exe (done on this branch):** `cmd.exe` argv verbatim; runfiles
