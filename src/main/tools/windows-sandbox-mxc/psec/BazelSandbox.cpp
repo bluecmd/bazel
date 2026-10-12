@@ -560,7 +560,17 @@ Policy BuildPolicy(const Args& a, const std::wstring& cwd, const std::vector<std
     else { std::wstring d = Parent(p); pol.rw.push_back(d.empty() ? p : d); }
   }
   pol.rw.insert(pol.rw.end(), extraRw.begin(), extraRw.end());
-  pol.ro = a.ro;
+  // Runfiles directories (<tool>.runfiles, an output of Bazel's own) are the
+  // cwd of every test. The kernel policy denies FILE_TRAVERSE opens, i.e.
+  // SetCurrentDirectory, under a read-only grant (see
+  // GAPS-all-actions-sandboxed.md), so grant them read-write instead unless
+  // BAZEL_PSEC_RUNFILES_RO is set.
+  const bool runfilesRw = !EnvSet(L"BAZEL_PSEC_RUNFILES_RO");
+  for (const auto& p : a.ro) {
+    std::wstring k = Key(p);
+    if (runfilesRw && k.size() > 9 && k.compare(k.size() - 9, 9, L".runfiles") == 0 && IsDir(p)) pol.rw.push_back(p);
+    else pol.ro.push_back(p);
+  }
   pol.ro.insert(pol.ro.end(), extraRo.begin(), extraRo.end());
   // The execroot is a symlink forest and the policy is evaluated on the
   // resolved target, so grant that too.
@@ -732,10 +742,17 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring abs = IsAbsolute(argvv[0]) ? argvv[0] : cwd + L"\\" + argvv[0];
     if (Exists(abs)) argvv[0] = Backslashes(abs);
   }
+  // Bazel's own Windows subprocess factory appends the arguments of cmd.exe
+  // verbatim (cmd.exe does not use the CRT's quoting rules; a cmd_bat genrule
+  // passes its whole command, embedded quotes included, as one argument).
+  // Everything else is quoted the CRT way, like ShellUtils.windowsEscapeArg.
   std::wstring cmdline;
+  std::wstring argv0Lower = Key(argvv[0]);
+  bool isCmd = argv0Lower == L"cmd.exe" || (argv0Lower.size() > 8 && argv0Lower.compare(argv0Lower.size() - 8, 8, L"\\cmd.exe") == 0);
   for (size_t i = 0; i < argvv.size(); ++i) {
     if (i) cmdline += L' ';
-    QuoteArg(cmdline, argvv[i]);
+    if (isCmd && i > 0) cmdline += argvv[i];
+    else QuoteArg(cmdline, argvv[i]);
   }
 
   Spec spec;
