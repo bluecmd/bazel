@@ -28,6 +28,11 @@ crate, so the process security environment is created in-process: Bazel ->
 was a C shim around `wxc-exec.exe`; the exe hop cost about 25 ms per action
 and nothing else, since `wxc-exec` is itself a thin CLI over the same crate.)
 
+> **In-process successor:** [`PSEC-JNI.md`](PSEC-JNI.md) describes the
+> `windows-psec` strategy on the `windows-sandbox-psec-jni` branch: the Bazel
+> server creates the process security environments itself through JNI, pools
+> them by policy, and needs neither this adapter nor the MXC SDK.
+
 ## Contents
 
 | file | what |
