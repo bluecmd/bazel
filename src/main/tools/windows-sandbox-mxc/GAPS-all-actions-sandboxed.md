@@ -316,6 +316,133 @@ uses the runfiles library needs bash proper, i.e. the MSYS fix (gap 1), or
 a rewrite of its bootstrap. `zip_builtins.sh` (no runfiles library) runs
 fine under busybox once the sh toolchain points at it.
 
+## 4.9 In the kernel: `bfs.sys` on a KDNET target
+
+The two OS behaviours that matter most, the `FILE_TRAVERSE` denial (4.2) and
+the per-file cost (section 0), were taken down to the filter driver on a
+kernel-debugged VM (`kdt` target `psec2`, golden image `vdi/win11-golden-9550`
+= the pipeline's `win11-patched:26H2-26300.9550`, kernel 10.0.26100.9549,
+`bfs.sys` byte-identical to the experiment VM's, SHA-256 `5f86642c…`). The
+driver has no public symbols on Microsoft's server (404 for its PDB GUID),
+but the binary's functions are fully named (IDA, `psec/experiments/bfs-funcs.txt`),
+and ntoseye resolves the same names, so breakpoints by name work.
+
+### 4.9.1 `FILE_TRAVERSE` is denied by one access-mask constant
+
+`bfs!BfsQueryAccessOnly(int kind, PFLT_CALLBACK_DATA data)` decides whether an
+open under a **read-only** grant (policy value 2) is "query-only" and may
+proceed. `kind` is 2 when `Create.Options` has `FILE_DIRECTORY_FILE`, else 1.
+The function reads `OriginalDesiredAccess` from the create's access state and
+tests it against one of three constants:
+
+```
+cmp   esi, 2                      ; directory open?
+jnz   file
+test  ebx, 0FFE1FF7Eh             ; directory: allowed = 0x001E0081
+jmp   done                        ;   FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+file:
+call  Feature_BfsQueryOnlyAllowExecute…   ; (on in this build)
+test  ebx, 0FFE1FF56h             ; file: allowed = 0x001E00A9 = … | FILE_READ_DATA | FILE_READ_EA | FILE_EXECUTE
+test  ebx, 0FFE1FF76h             ; file, feature off
+setz  al
+```
+
+`FILE_EXECUTE` and `FILE_TRAVERSE` are the same bit (0x20). The
+`BfsQueryOnlyAllowExecute` feature added it to the **file** mask only; the
+**directory** mask never got it. Live, with a breakpoint on the function and
+`nttest ntopen` inside an environment that grants `C:\kd\files` read-only:
+
+| open | `kind` (rcx) | `OriginalDesiredAccess` | `Create.Options` | calls | result |
+|---|---|---|---|---|---|
+| `FILE_TRAVERSE`, `FILE_DIRECTORY_FILE` | 2 | 0x20 | 0x01000001 | 2 (the read-only path calls it again when it returns false) | `STATUS_ACCESS_DENIED` |
+| `FILE_TRAVERSE`, no options | 1 | 0x20 | 0x01000000 | 1 | success |
+| `FILE_LIST_DIRECTORY`, `FILE_DIRECTORY_FILE` | 2 | 0x01 | 0x01000001 | 1 | success |
+
+Stack at the breakpoint: `bfs!BfsQueryAccessOnly` ← `bfs!BfsCheckAndApplyPolicy+0xa0d`
+← `bfs!BfsPreCreateOperation+0x76b` ← `fltmgr!FltpPerformPreCallbacksWorker`
+← `fltmgr!FltpCreate`. `SetCurrentDirectory` always opens with
+`FILE_TRAVERSE | SYNCHRONIZE` and `FILE_DIRECTORY_FILE`, so it always takes the
+denied row. The enumerate-only policy (value 6) has its own mask in
+`BfsCheckAndApplyPolicy` (`0xFFEDFF76`, allowed `0x00120089`), also without
+0x20, which is why `cd` into an enumerate-only ancestor fails too. Verdict: a
+one-constant bug (the directory mask should be `0xFFE1FF5E`), not a policy;
+traverse grants nothing that the already-allowed listing does not, and the
+contained token even holds `SeChangeNotifyPrivilege`.
+
+### 4.9.2 Where the per-file cost goes
+
+Measured on the 2-vCPU debug VM with `nttest openloop` (open + read 1 byte +
+close of 1 000 files, in a loop) inside an environment, and WPR CPU sampling
+(1 kHz, kernel and user, stacks) dumped with `tracerpt` and symbolized
+through the kernel debugger (`psec/experiments/kernel/`). Two separate costs:
+
+**A. Creating the environment: ~1 ms per granted path, in the broker.**
+
+| grants | `CreateProcessSecurityEnvironment` | 
+|---|---|
+| 1 directory | 40 ms |
+| 1 000 files | 1 091 ms |
+| 4 000 files | 3 807 ms |
+
+The caller's process barely works (477 samples); the time is CPU in
+`svchost.exe -k netsvcs -p -s Appinfo` (3 601 samples = 3.6 s for 4 000
+paths), the AppInfo service that `processmodel.dll` reaches over `ncalrpc`
+(the plan's `AppInfoSandboxLaunch` endpoint). Inclusive profile of that
+service during the creation: `nt!NtOpenFile` 23 %, `nt!NtClose` 23 %,
+`nt!NtDeviceIoControlFile` 18.5 % (of which `bfs!BfsProcessSetPolicyRequest`
+11 %), `nt!NtCreateFile` 12 %, `nt!NtQueryFullAttributesFile` 5 %,
+`ntfs!NtfsCommonCreate` 9 %. So per path the service opens the target
+(twice, once as a file, once through `NtCreateFile`), stats it, closes it,
+and then issues the set-policy IOCTL; `bfs.sys` itself is a tenth of the
+work. Inside the IOCTL the policy is **written to disk**: a breakpoint pair on
+`bfs!BfsProcessSetPolicyRequest` and `bfs!BfsWriteBlock` during a 100-path
+creation stops 1 : 11 in the first dozen hits, i.e. every path insert ends in
+several `ZwWriteFile`s of 16 KB blocks to the file-backed policy store
+(`BfsCreateStorage` / `BfsAddOrModifyEntry`); the `BfsInMemoryPolicies`
+feature that would skip this is not active on this build. Nothing here is
+per-open state: it is paid once per environment, which is why pooling and
+directory grants (section 0, the JNI branch) remove it.
+
+**B. Every open inside the environment: +170 µs, in the opener's thread,
+independent of policy size.**
+
+| policy | µs per open (2-vCPU VM, no profiler) | opener CPU for 30 000 opens (profiled) |
+|---|---|---|
+| none (plain process) | 111 | 4.7 s |
+| 1 directory grant | 280 | 12.1 s |
+| 1 000 file grants | 303 | 12.8 s |
+| 4 000 file grants | 332 | — |
+
+The policy lookup itself is cheap (`bfs!BfsGetPolicy` + `BfsFindEntry` ≈ 5 %
+of the opener's CPU, hash-table per path component, hence the small growth
+with 4 000 entries). The tax is what `BfsPreCreateOperation` makes the
+kernel do for each create, inclusive of the opener's CPU under the
+environment vs without:
+
+| work per create | sandboxed | plain |
+|---|---|---|
+| `bfs!BfsPreCreateOperation` (all of the filter's work) | 53 % | 1 % |
+| `fltmgr!FltGetFileNameInformation` (normalized name) → `luafv!LuafvGenerateFileName` 19.6 %, `fltmgr!FltpExpandFilePathWorker` 11 % (parent-directory walk, `NtQueryDirectoryFile` 4 %) | 33 % | 0.8 % |
+| `bfs!BfsIsApplicableToken` → `nt!RtlCheckTokenCapability` | 11 % / 7 % | 0.5 % |
+| `bfs!BfsApplyPolicyAsUser` → `nt!NtDuplicateToken` 4.3 %, `ObOpenObjectByPointer` 2 % | 7 % | 0 |
+| `nt!ExAllocatePool2` (name buffers, contexts, token copies) | 7 % | 3 % |
+
+In absolute terms the environment adds about 8 s of opener CPU per 30 000
+opens: roughly half is the normalized-name query that `bfs.sys` issues on
+every create (and which the LUA virtualization filter above it answers by
+generating the name and walking parent directories), a tenth the capability
+check of the AppContainer token, a tenth the token duplication and
+attribute rewrite that lets the open proceed as the medium-integrity user,
+the rest allocation and the second pass through the filter stack. None of
+it depends on how many paths the policy holds, which is the measured fact
+behind "precise mode is only 1 % slower than the adapter and 55 % slower
+than local" in the JNI branch: the per-file policy costs at creation, the
+per-open mediation costs the same under any policy. What would shrink B is
+Microsoft's: caching the normalized name on the stream context instead of
+querying it per create, skipping the capability check when the policy
+decision does not need it, and not duplicating a token per open (one
+impersonation token per environment would do).
+
 ## 5. Fixes, by class
 
 **c, in the exe (done on this branch):** `cmd.exe` argv verbatim; runfiles
