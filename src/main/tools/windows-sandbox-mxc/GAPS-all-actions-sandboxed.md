@@ -427,6 +427,12 @@ environment vs without:
 | `bfs!BfsApplyPolicyAsUser` → `nt!NtDuplicateToken` 4.3 %, `ObOpenObjectByPointer` 2 % | 7 % | 0 |
 | `nt!ExAllocatePool2` (name buffers, contexts, token copies) | 7 % | 3 % |
 
+A FileIO trace of 5 000 sandboxed opens shows 5 004 `Create` events for the
+opener in both configurations, so the filter does **not** re-open the
+target as the user; the normalized-name query is answered by name providers
+and directory walks (the `System` process logs 2 101 `Close` events against
+1 004 without an environment).
+
 In absolute terms the environment adds about 8 s of opener CPU per 30 000
 opens: roughly half is the normalized-name query that `bfs.sys` issues on
 every create (and which the LUA virtualization filter above it answers by
