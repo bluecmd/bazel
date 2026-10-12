@@ -10,7 +10,7 @@ granted **read-only** can be listed and stat'ed but cannot be opened with
 `FILE_TRAVERSE` when the open carries `FILE_DIRECTORY_FILE`. That is exactly
 the open `SetCurrentDirectoryW` performs, so `cd` into a read-only directory
 fails with `ERROR_ACCESS_DENIED` (and `chdir` of every runtime that wraps it:
-cmd.exe, PowerShell's start location, busybox, Bazel's test wrapper). The same
+cmd.exe, PowerShell's start location, busybox). The same
 right is **allowed** when the open does not carry `FILE_DIRECTORY_FILE`, and
 `FILE_LIST_DIRECTORY` with `FILE_DIRECTORY_FILE` is allowed, so this is not an
 intended restriction but an asymmetric access mask. Enumerate-only paths
@@ -29,11 +29,7 @@ NtOpenFile(dir, FILE_READ_ATTRIBUTES,       FILE_DIRECTORY_FILE)                
 cmd.exe /c "cd /d <read-only dir>"                                              -> "Access is denied."
 ```
 
-With a read-write grant all of them succeed. (A minimal probe: `nttest.exe
-ntopen <path> <access-hex> <options-hex>` from
-`src/main/tools/windows-sandbox-mxc/psec/experiments/nttest.cpp` on the
-`windows-sandbox-psec-exe` branch of github.com/bluecmd/bazel, run through
-`wxc-exec` or any `CreateProcessSecurityEnvironment` launcher.)
+With a read-write grant all of them succeed.
 
 ## Where it is
 
