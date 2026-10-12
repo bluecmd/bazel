@@ -87,6 +87,7 @@ int wmain(int argc, wchar_t** argv) {
     PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY sh{}; GetProcessMitigationPolicy(GetCurrentProcess(), ProcessStrictHandleCheckPolicy, &sh, sizeof sh); wprintf(L"StrictHandle: RaiseOnInvalid=%u\n", sh.RaiseExceptionOnInvalidHandleReference);
     return 0;
   }
+  if (m == L"sleep") { Sleep(_wtoi(argv[2])); wprintf(L"slept %s ms\n", argv[2]); return 0; }
   if (m == L"exec") { std::wstring cl; for (int i = 2; i < argc; i++) { if (i > 2) cl += L' '; cl += argv[i]; } STARTUPINFOW si{sizeof si}; PROCESS_INFORMATION pi{}; BOOL ok = CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi); R(cl.c_str(), ok); if (ok) { WaitForSingleObject(pi.hProcess, INFINITE); DWORD c; GetExitCodeProcess(pi.hProcess, &c); wprintf(L"  exit %u (0x%X)\n", c, c); } return 0; }
   wprintf(L"unknown mode\n"); return 2;
 }

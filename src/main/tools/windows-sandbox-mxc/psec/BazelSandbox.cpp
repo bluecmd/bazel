@@ -688,8 +688,39 @@ std::wstring ProfileDir() {
 // main
 // ---------------------------------------------------------------------------
 
+// Trampoline mode (`BazelSandbox.exe --run -- cmd...`): runs inside the
+// environment and just starts the command and waits for it. Used when
+// BAZEL_PSEC_TRAMPOLINE is set so that the action's parent process is itself
+// confined: busybox-w32 (and anything else that opens its parent process)
+// otherwise sees an unopenable parent outside the AppContainer and treats
+// itself as orphaned (busybox's getppid() == 1 -> exit without waiting).
+int RunTrampoline(int argc, wchar_t** argv) {
+  std::wstring cmdline;
+  bool isCmd = false;
+  for (int i = 0; i < argc; ++i) {
+    std::wstring a = argv[i];
+    if (i == 0) { std::wstring k = Key(a); isCmd = k == L"cmd.exe" || (k.size() > 8 && k.compare(k.size() - 8, 8, L"\\cmd.exe") == 0); }
+    if (i) cmdline += L' ';
+    if (isCmd && i > 0) cmdline += a; else QuoteArg(cmdline, a);
+  }
+  std::vector<wchar_t> cl(cmdline.begin(), cmdline.end()); cl.push_back(0);
+  STARTUPINFOW si{sizeof(si)};
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, cl.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+    Err(L"trampoline: CreateProcessW failed: %u (%s)", GetLastError(), cmdline.c_str());
+    return 1;
+  }
+  CloseHandle(pi.hThread);
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  return (int)code;
+}
+
 int wmain(int argc, wchar_t** argv) {
   auto t0 = Clock::now();
+  if (argc >= 3 && wcscmp(argv[1], L"--run") == 0 && wcscmp(argv[2], L"--") == 0) return RunTrampoline(argc - 3, argv + 3);
   Args args;
   if (!ParseArgs(argc, argv, args)) return 64;
 
@@ -746,6 +777,11 @@ int wmain(int argc, wchar_t** argv) {
   if (argvv[0].find_first_of(L"\\/") != std::wstring::npos) {
     std::wstring abs = IsAbsolute(argvv[0]) ? argvv[0] : cwd + L"\\" + argvv[0];
     if (Exists(abs)) argvv[0] = Backslashes(abs);
+  }
+  if (EnvSet(L"BAZEL_PSEC_TRAMPOLINE")) {
+    wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr, self, MAX_PATH);
+    pol.ro.push_back(self);
+    argvv.insert(argvv.begin(), {std::wstring(self), L"--run", L"--"});
   }
   // Bazel's own Windows subprocess factory appends the arguments of cmd.exe
   // verbatim (cmd.exe does not use the CRT's quoting rules; a cmd_bat genrule
