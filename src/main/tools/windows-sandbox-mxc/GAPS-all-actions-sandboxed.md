@@ -24,8 +24,9 @@ command that reproduces it.
 |---|---|
 | today: `windows-sandbox` + native exe, `Genrule` and `ProtocAuthenticityCheck` local (box, `--jobs=16`, directory grants) | **builds**: 6 244 processes = 1 384 internal, 138 local, 4 768 `windows-sandbox`; 2 825 s wall (the Rust MXC adapter with directory grants took 2 866 s on the same box, `local` 2 022-2 070 s) |
 | every action through `windows-sandbox`, git-bash as the shell (VM) | 1 536 actions sandboxed, then 117 `Genrule`/`ProtocAuthenticityCheck` actions fail (git-bash dies at start), 1 `local = 1` genrule refused, 1 `cmd_bat` genrule failed (adapter bug, fixed); everything downstream of the bash genrules (~3 000 actions, all of the Java tree) never runs |
-| every action through `windows-sandbox`, busybox-w32 as the shell (VM) | TBD_EXE5 |
-| `bazel test` of a cc/java/py/sh test each, sandboxed | TBD_TESTS |
+| every action through `windows-sandbox`, busybox-w32 as the genrule shell (box, `--jobs=16`, long-path exe) | 3 623 processes (2 253 sandboxed) in 955 s, then stops at 6 229 of 6 244 with 8 failing actions: 2 `sh_binary` tools whose launcher runs git-bash (`minimize_jdk`, `zip_builtins`), 5 genrules whose last command is killed because busybox does not wait for it (4.7), the `local = 1` genrule |
+| … plus busybox as the sh toolchain (`--repo_env=BAZEL_SH`) and the confined trampoline (box) | 3 624 processes (2 253 sandboxed) in 1 020 s, stops at 6 229: `zip_builtins` now passes; `minimize_jdk.sh` fails under busybox's ash (the bash runfiles bootstrap `source "${RUNFILES_DIR:-/dev/null}/$f" \|\| …` makes a POSIX shell exit, 4.8); fastutil + 4 upb genrules still fail at `$(…)` ("unable to spawn shell", 4.7); the `local = 1` genrule |
+| `bazel test` of a cc/java/py/sh test each, sandboxed | cc, java, py **pass** (runfiles manifest, `TEST_TMPDIR`, undeclared outputs, zipped `py_test`); `sh_test` fails: its launcher runs git-bash (gap 18) |
 
 The one blocker that matters is **the MSYS runtime (git-bash) cannot start
 inside a process security environment**, and the reason is now exact: the
@@ -261,6 +262,58 @@ all-sandboxed build ran rules_pkg's zipped `build_tar` (`PackageTar`) with
 `TMPDIR` = Bazel's `<execroot>\windows-sandbox.<n>\work`; it extracted and
 ran.
 
+### 4.7 busybox does not wait for its last command inside the environment (gap 13)
+
+With busybox as the shell, five genrules of the all-sandboxed build failed
+although every one of them passes when its exact grants and command are
+replayed by hand (`upb1.cmd`, `spawn*.cmd`, 160 concurrent replays in
+`stress1.cmd`, 0 failures). A Process Monitor trace of the real action
+(`pmgen2.cmd`, box) shows the sequence: `bash.exe` starts, spawns its
+`sh --fs` helper for `$(dirname …)` (exit 0), spawns `protoc_minimal.exe`,
+and **exits with status 0 five milliseconds later**; `BazelSandbox.exe`
+then closes its kill-on-close job and protoc dies after resolving its DLLs,
+having written nothing ("declared output … was not created"). The timing
+probe confirms it (`wait2.cmd`): `bash -c "nttest sleep 3000"` returns after
+0.2 s inside an environment and after 3 s outside; `bash -c "nttest sleep
+3000; echo after"` (not the last command) waits in both.
+
+The cause is in busybox-w32's `exec` path: `wait_for_child()` in
+`win32/process.c` begins with `if (getppid() == 1) exit(0);`, and
+`getppid()` walks a Toolhelp process snapshot. Inside the AppContainer the
+snapshot shows only the container's own processes (`busybox ps`: the shell,
+its `conhost.exe`, the applet; PPID 1), the unconfined parent
+`BazelSandbox.exe` is invisible, so busybox believes it is orphaned and
+exits without waiting. The "unable to spawn shell" failures of the same
+genrules are the same mechanism one step earlier. Two fixes:
+
+* **exe (c, done):** `BAZEL_PSEC_TRAMPOLINE=1` runs the action as
+  `BazelSandbox.exe --run -- <cmd>` inside the environment, so the shell's
+  parent is a confined process it can see; `bash -c "nttest sleep 3000"`
+  then takes 3 s and prints its output, and `ps` shows the parent. Cost: one
+  extra process per action (~10 ms).
+* **busybox (d):** `getppid()` from
+  `NtQueryInformationProcess(ProcessBasicInformation).InheritedFromUniqueProcessId`
+  instead of a snapshot walk; a few lines.
+
+### 4.8 Bazel's bash runfiles bootstrap under busybox's ash (gap 13)
+
+`minimize_jdk.sh` (and every script that pastes Bazel's runfiles
+boilerplate) begins with
+
+```
+source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "${RUNFILES_MANIFEST_FILE:-/dev/null}" | cut -f2- -d' ')" 2>/dev/null || …
+```
+
+In bash a failing `source` inside a `||` list continues to the next
+alternative. In a POSIX shell `.` is a special builtin and a failing one
+terminates a non-interactive shell; busybox's ash does exactly that
+(`bash -x`: `+ source /dev/null/bazel_tools/tools/bash/runfiles/runfiles.bash`,
+then exit 0, no message, outside the sandbox too). So any `sh_binary` that
+uses the runfiles library needs bash proper, i.e. the MSYS fix (gap 1), or
+a rewrite of its bootstrap. `zip_builtins.sh` (no runfiles library) runs
+fine under busybox once the sh toolchain points at it.
+
 ## 5. Fixes, by class
 
 **c, in the exe (done on this branch):** `cmd.exe` argv verbatim; runfiles
@@ -294,7 +347,38 @@ links in read-write grants; USER32 from session 0.
 
 ## 6. Shortest path to 100 %
 
-TBD_PATH
+Today 4 768 of the 6 244 actions (every spawn except 138 bash ones) run in
+a security environment through the native exe, and the build succeeds. The
+remaining 138 spawns are bash, and they all hinge on one thing: a shell that
+starts inside an AppContainer.
+
+1. **Now, without touching Bazel or Windows (hours):** busybox-w32 as the
+   shell for genrules *and* for the sh toolchain
+   (`--shell_executable=…\bash.exe --repo_env=BAZEL_SH=…\bash.exe`, a
+   `longPathAware` busybox, a native `zip.exe` next to it, the shell
+   directory in the read-only roots), `local = 1` removed from the
+   xcode-locator genrule, `cmd_ps` without `Set-ExecutionPolicy`. What this
+   leaves: scripts that need bash proper (TBD_BUSYBOX_RESIDUE). Those few
+   stay `--strategy=<mnemonic>=local` or get rewritten.
+2. **The real fix (days, in the toolchain):** the MSYS runtime made
+   AppContainer-aware (section 4.1), so git-bash, `sh_binary`, `sh_test` and
+   every `cmd` genrule run unchanged. This is a contained change to
+   `winsup/cygwin` and does not need Bazel or Windows changes; it needs Git
+   for Windows (or MSYS2) to ship it.
+3. **Bazel side (hours each, independent of 1 and 2):** read-only roots and
+   the shell directory as `-r`, runfiles directory writable, per-action
+   temp, `requires-network`, and the `cmd_ps` prologue.
+4. **Not needed for Bazel's own build, but for "every action anywhere":**
+   sandboxed workers (days), and from Microsoft: `FILE_TRAVERSE` on
+   read-only grants, junctions/hard links in read-write grants, a
+   non-AppContainer identity, USER32 from session 0.
+
+What remains Microsoft's to change after 1-3 are done: nothing that blocks
+Bazel's own build. The three OS behaviours that cost workarounds are the
+`FILE_TRAVERSE` denial (worked around by the runfiles grant, but any action
+that `cd`s into a read-only directory still fails), the AppContainer
+identity (the reason MSYS needs a patch at all; it also stripes the symlink
+privilege and redirects `TEMP`), and the session-0 restriction on USER32.
 
 ## 7. Experiments (reproducible)
 
