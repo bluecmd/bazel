@@ -591,7 +591,8 @@ detection altogether for the drive-letter paths that are the common case;
 and turn on `BfsInMemoryPolicies`, which `ApplyFilesystem` already supports
 (IOCTL `0x228014`), to drop the policy-store writes from phase 2. Either of
 the first two removes ~75 % of the creation cost without touching the
-driver.
+driver. Filed as <https://github.com/microsoft/mxc/issues/1468>
+(draft: `psec/experiments/MXC-ISSUE-volumepath.md`).
 
 **Our side:** the client's own 60 ms before the RPC (BazelSandbox.exe,
 100 – 185 ms in the trace) is `FinalPath()`: `CreateFileW` +

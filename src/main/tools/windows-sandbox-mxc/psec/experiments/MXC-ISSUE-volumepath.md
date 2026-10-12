@@ -1,4 +1,4 @@
-# Draft issue for github.com/microsoft/mxc
+# Issue for github.com/microsoft/mxc, filed as https://github.com/microsoft/mxc/issues/1468
 
 **Title:** Process container: environment creation costs ~1 ms per granted path in `GetVolumePathNameW`
 
