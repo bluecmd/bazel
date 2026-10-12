@@ -179,10 +179,27 @@ public final class WindowsPsecPolicyBuilderTest {
         .containsExactly(
             "C:\\Kits", EXEC + "\\bazel-out\\bin\\x", "C:\\VS", "C:\\ws\\src\\a")
         .inOrder();
-    // bin\a holds the output: gen.h is covered by the read-write grant.
-    assertThat(spec.readWrite())
-        .containsExactly(EXEC + "\\bazel-out\\bin\\a", TMP + "\\1")
-        .inOrder();
+    // bin\a holds the output: gen.h is covered by the read-write grant. The per-action temp
+    // directory is granted through the temp root, so policies can be shared.
+    assertThat(spec.readWrite()).containsExactly(EXEC + "\\bazel-out\\bin\\a", TMP).inOrder();
+  }
+
+  @Test
+  public void directories_actionsWithTheSameDirectoriesShareOnePolicy() {
+    WindowsPsecPolicyBuilder b = builder(WindowsPsecPolicy.DIRECTORIES, false);
+    Spec one =
+        build(
+            b,
+            ImmutableList.of(EXEC + "\\src\\a\\b.c", EXEC + "\\src\\a\\b.h"),
+            ImmutableList.of(EXEC + "\\bazel-out\\bin\\a\\_objs\\b.obj"),
+            TMP + "\\1");
+    Spec two =
+        build(
+            b,
+            ImmutableList.of(EXEC + "\\src\\a\\c.c", EXEC + "\\src\\a\\b.h"),
+            ImmutableList.of(EXEC + "\\bazel-out\\bin\\a\\_objs\\c.obj"),
+            TMP + "\\2");
+    assertThat(one).isEqualTo(two);
   }
 
   @Test

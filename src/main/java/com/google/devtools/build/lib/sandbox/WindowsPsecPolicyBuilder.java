@@ -178,7 +178,13 @@ final class WindowsPsecPolicyBuilder {
       rw.add(parent(win(f)));
     }
     for (String d : outputDirs) {
-      rw.add(win(d));
+      String dir = win(d);
+      // Outside PRECISE mode the per-action temporary directory is granted through the temp
+      // root, or no two actions would ever have the same policy.
+      if (mode != WindowsPsecPolicy.PRECISE && isSameOrUnder(key(dir), key(tmpRoot))) {
+        dir = tmpRoot;
+      }
+      rw.add(dir);
     }
 
     List<String> roFiles = new ArrayList<>(inputFiles.size());
