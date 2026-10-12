@@ -1,6 +1,6 @@
 # Draft issue for github.com/microsoft/mxc
 
-**Title:** Process container: `FILE_TRAVERSE` opens of a directory are denied under a read-only path grant (`bfs.sys` `BfsQueryAccessOnly` directory mask lacks bit 0x20), so `SetCurrentDirectory` into any read-only or enumerate-only path fails
+**Title:** Process container: `SetCurrentDirectory` into a read-only path fails (FILE_TRAVERSE denied for directory opens)
 
 ## Summary
 
