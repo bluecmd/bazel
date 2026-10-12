@@ -449,6 +449,91 @@ querying it per create, skipping the capability check when the policy
 decision does not need it, and not duplicating a token per open (one
 impersonation token per environment would do).
 
+### 4.9.3 The same, as a Perfetto trace across the svchost boundary
+
+`psec/experiments/kernel/psec-trace.perfetto.json.gz` is a 1.3 s kernel
+trace of one environment creation with 300 file grants followed by 300 × 3
+sandboxed opens (`kd-trace.cmd`: `BazelSandbox.exe` → `nttest.exe openloop`),
+recorded with WPR (`psec.wprp`: context switches, ready-thread, system calls,
+1 kHz sampling with stacks, FileIO) and converted with `etw2perfetto.py`
+(etl-parser for the file framing, own MOF decoding, symbols through the
+kernel debugger's `ln`). Open it at <https://ui.perfetto.dev> (Open trace
+file; gzip is accepted). Tracks:
+
+- *CPU scheduling*: one track per vCPU, slices named `<image> <tid>`.
+- *BazelSandbox.exe*, *svchost (Appinfo)*, *nttest.exe*, *System*: per
+  thread, every system call as a slice (NTSTATUS in the args), with the
+  `Zw*` calls that kernel code makes on the thread's behalf nested inside
+  the user call (category `zwcall`), FileIO operations nested inside those
+  (`Create <path>` … `Close`, create options and status in the args), profiler
+  samples as instants (symbolized kernel stack in the args), and `wake` flows
+  from a `ReadyThread` in one of these processes to the thread it readies.
+- An async slice on the client marks the wait for the broker.
+
+What it shows, in order (times from trace start):
+
+| when | who | what |
+|---|---|---|
+| 121 – 185 ms | `BazelSandbox.exe` main thread | 60 ms of CPU in `processmodel.dll` before the RPC: per path 2 × `NtCreateFile`, 2 × `NtQueryInformationFile`, `NtQueryObject`, `NtDeviceIoControlFile` (the client canonicalizes every grant itself first) |
+| 185 – 528 ms | `BazelSandbox.exe` main thread | `NtWaitForSingleObject`, 343 ms: the environment-creation RPC is asynchronous, the client is idle |
+| 200 – 480 ms | `svchost (Appinfo)` thread 2540 | 100 % of one vCPU, 258 ms of it inside system calls; `System` another 20 ms (policy-store writes) |
+| 535 – 904 ms | `nttest.exe` | the sandboxed open loop, 100 % of one vCPU; `MsMpEng.exe` takes 16 % of the other |
+
+The broker's per-path sequence (thread 2540, any 1 ms window between 200
+and 480 ms; `brokerseq.py` prints it) is the cost. For a grant
+`C:\kd\files\d000\f00131.txt` it visits the target and **each ancestor
+directory** (`d000`, `files`, `kd`) and on every one of them does four
+opens, each with its own `NtClose` of 11 µs:
+
+```
+NtOpenFile   (0x01000060, open-reparse-point)  -> c00000ba for directories, NtOpenSymbolicLinkObject on the file
+NtCreateFile (dir + "\", 0x01200020) + NtFsControlFile -> c0000275 STATUS_NOT_A_REPARSE_POINT
+NtOpenFile   (0x01000020) + NtQueryVolumeInformationFile
+NtOpenFile   (0x01000010) + NtDeviceIoControlFile -> c000000d
+```
+
+then `NtQueryInformationProcess`, an open of the `bfs` device, a size-query
+IOCTL (`0x80000005`) and the set-policy IOCTL (13 – 29 µs), and a close.
+Totals for the 300 paths (thread 2540, 200 – 480 ms):
+
+| system call | count | per path | total |
+|---|---|---|---|
+| `NtClose` | 5 191 | 17.3 | 64 ms |
+| `NtOpenFile` | 3 951 | 13.2 | 66 ms |
+| `NtCreateFile` | 2 438 | 8.1 | 40 ms |
+| `NtDeviceIoControlFile` | 2 429 | 8.1 | 57 ms (of which the two `bfs` IOCTLs ≈ 10 ms) |
+| `NtFsControlFile` | 1 824 | 6.1 | 13 ms |
+| `NtQueryFullAttributesFile` | 295 | 1.0 | 16 ms |
+| `NtQueryVolumeInformationFile` | 1 214 | 4.0 | 0.5 ms |
+
+So the ~1 ms per path of section A is about 35 opens and closes per path
+in the AppInfo service, a reparse-point and volume check repeated for every
+ancestor of every grant with no caching across grants that share a parent
+(all 300 files here share three), and only a tenth of it the `bfs` policy
+insert. Nothing in the client's or the kernel's interface makes this
+per-ancestor walk necessary for a path the client already canonicalized.
+
+One sandboxed open in `nttest.exe` (`NtCreateFile`, median 227 µs, p90 299,
+against 21 µs for the same call in the unsandboxed client), as the nested
+calls show it:
+
+```
++  0.0  NtCreateFile                                   226 µs
++ 25.4    NtDuplicateToken        13.8 µs  (bfs!BfsIsApplicableToken / capability check)
++ 39.5    NtQueryInformationToken, NtClose, NtClose
++ 75.2    NtQueryDirectoryFile    13.5 µs  (fltmgr!FltpExpandFilePathWorker: normalized-name parent walk)
++ 90.2    NtClose                 15.0 µs
++125.8    NtClose                 12.2 µs
++176.3    NtDuplicateToken        11.2 µs  (bfs!BfsApplyPolicyAsUser)
++188.3    NtSetInformationToken × 2, NtClose × 2
++198.1    FileIo Create \kd\files\d000\f00170.txt   16.6 µs   <- the actual create
+```
+
+The create that the caller asked for starts 198 µs into the call and takes
+17 µs; everything before it is the filter's pre-create work from section B,
+now with its timing. The `NtClose` of the handle afterwards costs 34 µs
+median (2 µs unsandboxed), the second pass through the filter stack.
+
 ## 5. Fixes, by class
 
 **c, in the exe (done on this branch):** `cmd.exe` argv verbatim; runfiles
