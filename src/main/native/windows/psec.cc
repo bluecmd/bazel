@@ -393,10 +393,26 @@ struct NtUnicodeString {
 };
 typedef LONG(NTAPI* DosToNtPathFn)(PCWSTR, NtUnicodeString*, PWSTR*, void*);
 typedef void(NTAPI* FreeUnicodeStringFn)(NtUnicodeString*);
+struct NtIoStatusBlock {
+  union {
+    LONG Status;
+    void* Pointer;
+  };
+  ULONG_PTR Information;
+};
+typedef LONG(NTAPI* IoctlFn)(HANDLE, HANDLE, void*, void*, NtIoStatusBlock*,
+                             ULONG, void*, ULONG, void*, ULONG);
+
+constexpr LONG kStatusAccessDenied = static_cast<LONG>(0xC0000022);
+constexpr LONG kStatusObjectNameNotFound = static_cast<LONG>(0xC0000034);
+constexpr LONG kStatusObjectPathNotFound = static_cast<LONG>(0xC000003A);
+constexpr LONG kStatusFileIsADirectory = static_cast<LONG>(0xC00000BA);
+constexpr LONG kStatusNotADirectory = static_cast<LONG>(0xC0000103);
 
 struct ClientFsApi {
   DosToNtPathFn dos_to_nt = nullptr;
   FreeUnicodeStringFn free_string = nullptr;
+  IoctlFn ioctl = nullptr;
   HANDLE bfs = INVALID_HANDLE_VALUE;
   std::wstring cmd;  // the probe process image
   std::wstring error;
@@ -411,8 +427,11 @@ const ClientFsApi& GetClientFsApi() {
         GetProcAddress(ntdll, "RtlDosPathNameToNtPathName_U_WithStatus"));
     api.free_string = reinterpret_cast<FreeUnicodeStringFn>(
         GetProcAddress(ntdll, "RtlFreeUnicodeString"));
-    if (api.dos_to_nt == nullptr || api.free_string == nullptr) {
-      api.error = L"ntdll lacks RtlDosPathNameToNtPathName_U_WithStatus";
+    api.ioctl = reinterpret_cast<IoctlFn>(
+        GetProcAddress(ntdll, "NtDeviceIoControlFile"));
+    if (api.dos_to_nt == nullptr || api.free_string == nullptr ||
+        api.ioctl == nullptr) {
+      api.error = L"ntdll lacks RtlDosPathNameToNtPathName_U_WithStatus or NtDeviceIoControlFile";
       return;
     }
     // One handle for the whole process; requests on it are synchronous and
@@ -558,17 +577,60 @@ class ClientFsApplier {
  private:
   bool Vector(const std::vector<std::string>& paths, DWORD kind,
               std::vector<std::wstring>* missing_deny, std::wstring* error) {
+    // Bazel's grants are nearly all files (directories only for enumerate
+    // grants), and bfs.sys opens every path itself, failing a type mismatch
+    // before it changes anything. So the type is guessed, which saves the
+    // GetFileAttributesExW the service makes per path (about a third of
+    // the cost), and a mismatch is retried with the other type.
+    // Denied paths (few) take the service's way, because bfs.sys accepts a
+    // denied path that does not exist with either type.
+    DWORD guess = kind == kKindEnumerate ? kTypeDirectory : kTypeFile;
     for (const std::string& utf8 : paths) {
       std::wstring path = Widen(utf8);
-      DWORD type = TypeOf(path);
-      if (type == kTypeMissing) {
+      DWORD flags = (kind == kKindReadWrite && IsDriveRoot(path)) ? 0 : 2;
+      if (kind == kKindDeny) {
+        DWORD type = TypeOf(path);
+        if (type == kTypeMissing) {
+          missing_deny->push_back(path);
+          stats_->missing++;
+        } else if (!Send(path, type, kind, flags, error)) {
+          return false;
+        }
+        continue;
+      }
+      NtUnicodeString nt = {};
+      LONG status = fs_.dos_to_nt(path.c_str(), &nt, nullptr, nullptr);
+      if (status < 0) {
+        *error = L"cannot convert " + path + L" to an NT path: " +
+                 Hex(static_cast<uint32_t>(status));
+        return false;
+      }
+      status = Raw(nt, guess, kind, flags);
+      if (status == kStatusFileIsADirectory && guess == kTypeFile) {
+        status = Raw(nt, kTypeDirectory, kind, flags);
+      } else if (status == kStatusNotADirectory && guess == kTypeDirectory) {
+        status = Raw(nt, kTypeFile, kind, flags);
+      }
+      fs_.free_string(&nt);
+      if (status >= 0) {
+        stats_->applied++;
+        continue;
+      }
+      if (status == kStatusObjectNameNotFound ||
+          status == kStatusObjectPathNotFound) {
         // The service skips a path that does not exist; a missing denied path
         // is retried as a directory after all others.
         if (missing_deny != nullptr) missing_deny->push_back(path);
         stats_->missing++;
         continue;
       }
-      DWORD flags = (kind == kKindReadWrite && IsDriveRoot(path)) ? 0 : 2;
+      // Anything else: exactly what the service does.
+      DWORD type = TypeOf(path);
+      if (type == kTypeMissing) {
+        if (missing_deny != nullptr) missing_deny->push_back(path);
+        stats_->missing++;
+        continue;
+      }
       if (!Send(path, type, kind, flags, error)) return false;
     }
     return true;
@@ -586,15 +648,8 @@ class ClientFsApplier {
     return true;
   }
 
-  bool Send(const std::wstring& path, DWORD type, DWORD kind, DWORD flags,
-            std::wstring* error) {
-    NtUnicodeString nt = {};
-    LONG status = fs_.dos_to_nt(path.c_str(), &nt, nullptr, nullptr);
-    if (status < 0) {
-      *error = L"cannot convert " + path + L" to an NT path: " +
-               Hex(static_cast<uint32_t>(status));
-      return false;
-    }
+  // One set-policy request; returns the NTSTATUS.
+  LONG Raw(const NtUnicodeString& nt, DWORD type, DWORD kind, DWORD flags) {
     // BfsProcessSetPolicyRequest's 0x30-byte input.
     struct {
       HANDLE token;    // +0x00
@@ -607,16 +662,28 @@ class ClientFsApplier {
       DWORD pad2;
     } request = {token_, type, kind, flags, 0, nt, 0, 0};
     static_assert(sizeof(request) == 0x30, "bfs set-policy request layout");
-    DWORD returned = 0;
-    BOOL ok = DeviceIoControl(fs_.bfs, kBfsSetPolicy, &request,
-                              sizeof(request), nullptr, 0, &returned, nullptr);
-    DWORD last = GetLastError();
+    NtIoStatusBlock iosb = {};
+    return fs_.ioctl(fs_.bfs, nullptr, nullptr, nullptr, &iosb, kBfsSetPolicy,
+                     &request, sizeof(request), nullptr, 0);
+  }
+
+  // A set-policy request with the service's error handling.
+  bool Send(const std::wstring& path, DWORD type, DWORD kind, DWORD flags,
+            std::wstring* error) {
+    NtUnicodeString nt = {};
+    LONG status = fs_.dos_to_nt(path.c_str(), &nt, nullptr, nullptr);
+    if (status < 0) {
+      *error = L"cannot convert " + path + L" to an NT path: " +
+               Hex(static_cast<uint32_t>(status));
+      return false;
+    }
+    status = Raw(nt, type, kind, flags);
     fs_.free_string(&nt);
-    if (ok) {
+    if (status >= 0) {
       stats_->applied++;
       return true;
     }
-    if (last == ERROR_ACCESS_DENIED && kind != kKindDeny) {
+    if (status == kStatusAccessDenied && kind != kKindDeny) {
       // bfs.sys opens the path itself; the service then skips paths the user
       // could not read anyway and fails on the others. Same here.
       if (!UserCanRead(path)) {
@@ -624,8 +691,8 @@ class ClientFsApplier {
         return true;
       }
     }
-    *error = L"bfs.sys refused the policy for " + path + L": error " +
-             std::to_wstring(last);
+    *error = L"bfs.sys refused the policy for " + path + L": status " +
+             Hex(static_cast<uint32_t>(status));
     return false;
   }
 
