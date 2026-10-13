@@ -26,8 +26,9 @@ import javax.annotation.Nullable;
  *
  * <p>An environment is created once from a policy and can then be attached to any number of
  * processes, concurrently, with {@link WindowsProcesses#createProcessInSecurityEnvironment}.
- * Creating one costs about 30 ms plus about 1 ms per listed path; attaching it to a process costs
- * about 20 ms on top of a normal process start.
+ * Creating one costs about 30 ms plus about 1 ms per listed path (about 0.15 ms per path when the
+ * filesystem policy is applied client side); attaching it to a process costs about 20 ms on top
+ * of a normal process start.
  */
 public final class WindowsPsec {
 
@@ -62,6 +63,8 @@ public final class WindowsPsec {
    * @param disallowWin32k whether to block Win32k system calls (USER32 importers then fail)
    * @param uiRestrictions {@code JOB_OBJECT_UILIMIT_*} mask
    * @param allowNetwork whether outgoing network connections are allowed
+   * @param clientFs whether to apply the filesystem policy from this process (directly to the
+   *     bfs.sys filter driver) instead of through the AppInfo service; same enforcement, faster
    * @return the environment handle, to be released with {@link #closeEnvironment}
    */
   public static long createEnvironment(
@@ -71,7 +74,8 @@ public final class WindowsPsec {
       List<String> enumerate,
       boolean disallowWin32k,
       long uiRestrictions,
-      boolean allowNetwork)
+      boolean allowNetwork,
+      boolean clientFs)
       throws IOException {
     String[] error = new String[1];
     long handle =
@@ -83,6 +87,7 @@ public final class WindowsPsec {
             disallowWin32k,
             uiRestrictions,
             allowNetwork,
+            clientFs,
             error);
     if (handle == 0) {
       throw new IOException(
@@ -118,6 +123,7 @@ public final class WindowsPsec {
       boolean disallowWin32k,
       long uiRestrictions,
       boolean allowNetwork,
+      boolean clientFs,
       String[] errorHolder);
 
   private static native void nativeCloseEnvironment(long handle);

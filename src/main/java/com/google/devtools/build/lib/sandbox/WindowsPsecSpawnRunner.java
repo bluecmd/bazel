@@ -64,6 +64,7 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
   private final boolean allowNetworkForBuild;
   private final boolean debug;
   private final WindowsPsecPolicy mode;
+  private final boolean clientFs;
   private final AtomicLong nextId = new AtomicLong();
 
   /** Returns null if the strategy can be used on this machine, otherwise why not. */
@@ -81,6 +82,7 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
       WindowsPsecPolicy mode,
       List<PathFragment> readonlyRoots,
       int maxIdleEnvironments,
+      boolean clientFs,
       boolean debug)
       throws IOException {
     super(cmdEnv);
@@ -95,6 +97,7 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
     this.allowNetworkForBuild = SandboxHelpers.shouldAllowNetwork(cmdEnv.getOptions());
     this.debug = debug;
     this.mode = mode;
+    this.clientFs = clientFs;
     List<String> roots = new ArrayList<>();
     for (PathFragment root : readonlyRoots) {
       roots.add(root.getPathString());
@@ -124,7 +127,8 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
                       spec.enumerate(),
                       /* disallowWin32k= */ false,
                       WindowsPsec.DESKTOP_UI_RESTRICTIONS,
-                      spec.allowNetwork());
+                      spec.allowNetwork(),
+                      clientFs);
                 }
               }
 
@@ -301,9 +305,10 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
       reporter.handle(
           Event.info(
               String.format(
-                  "windows-psec (%s): %d actions, %d security environments created (%.1f s, %d"
-                      + " paths), %d actions reused one",
+                  "windows-psec (%s, %s): %d actions, %d security environments created (%.1f s,"
+                      + " %d paths), %d actions reused one",
                   mode.name().toLowerCase(Locale.ROOT),
+                  clientFs ? "client-side policy" : "service-side policy",
                   creates + reuses,
                   creates,
                   pool.createNanos.get() / 1e9,

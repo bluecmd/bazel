@@ -279,6 +279,19 @@ public abstract class SandboxOptions extends OptionsBase {
               + " reuse by later actions with the same policy.")
   public abstract int getWindowsPsecMaxIdleEnvironments();
 
+  @Option(
+      name = "experimental_windows_psec_client_fs",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "If true, the windows-psec strategy creates each security environment without paths and"
+              + " sends the filesystem policy to the bfs.sys filter driver itself, which costs"
+              + " about a seventh of letting the AppInfo service apply it (about 0.15 ms instead"
+              + " of 1 ms per path). Enforcement is the same. If false, the paths go into the"
+              + " environment's spec.")
+  public abstract boolean getWindowsPsecClientFs();
+
   public ImmutableSet<Path> getInaccessiblePaths(FileSystem fs) {
     List<Path> inaccessiblePaths = new ArrayList<>();
     for (PathFragment path : getSandboxBlockPath()) {

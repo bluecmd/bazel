@@ -81,12 +81,39 @@ std::vector<uint8_t> EncodeSpec(const Spec& spec, uint16_t major,
 // success, otherwise why PSEC cannot be used on this machine.
 std::wstring EnsureLoaded();
 
+// How the filesystem part of a policy reaches the kernel.
+enum class FsApply {
+  // In the spec: the AppInfo service applies every path, sequentially, at
+  // about 1 ms per path (a GetVolumePathNameW walk over every ancestor plus a
+  // file-backed policy-store write, microsoft/mxc#1468).
+  kService,
+  // Client side: the spec carries no paths, so the service skips its
+  // per-path loops, and this process sends the same bfs.sys policy requests
+  // itself (about 0.1 ms per path, in-memory policy store when available).
+  kClient,
+};
+
+// What creating an environment did, for diagnostics.
+struct CreateStats {
+  // Client side only: policies sent to bfs.sys, paths skipped because they do
+  // not exist, whether bfs.sys keeps them in memory, and the time spent
+  // getting the token and applying the paths.
+  uint32_t applied = 0;
+  uint32_t missing = 0;
+  bool in_memory = false;
+  double token_ms = 0;
+  double apply_ms = 0;
+};
+
 // Creates a security environment for `spec`. On failure returns nullptr and
-// sets `error`.
-HANDLE CreateEnvironment(const Spec& spec, std::wstring* error);
+// sets `error`. `stats` may be null.
+HANDLE CreateEnvironment(const Spec& spec, FsApply fs, std::wstring* error,
+                         CreateStats* stats = nullptr);
 
 // Releases an environment. Processes already started in it keep running and
 // stay confined; the handle must not be used for new processes afterwards.
+// For a kClient environment no process may still run in it: its filesystem
+// policy is removed too.
 void CloseEnvironment(HANDLE env);
 
 #endif  // _WIN32

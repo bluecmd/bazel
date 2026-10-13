@@ -96,7 +96,7 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeCreateEnvironment(
     JNIEnv* env, jclass clazz, jobjectArray read_write, jobjectArray read_only,
     jobjectArray deny, jobjectArray enumerate, jboolean disallow_win32k,
-    jlong ui_restrictions, jboolean allow_network,
+    jlong ui_restrictions, jboolean allow_network, jboolean client_fs,
     jobjectArray error_msg_holder) {
   bazel::windows::psec::Spec spec;
   spec.read_write = GetStrings(env, read_write);
@@ -107,7 +107,11 @@ Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeCreateEnvironment(
   spec.ui_restrictions = static_cast<uint64_t>(ui_restrictions);
   spec.allow_network = allow_network;
   std::wstring error;
-  HANDLE result = bazel::windows::psec::CreateEnvironment(spec, &error);
+  HANDLE result = bazel::windows::psec::CreateEnvironment(
+      spec,
+      client_fs ? bazel::windows::psec::FsApply::kClient
+                : bazel::windows::psec::FsApply::kService,
+      &error);
   if (result == nullptr && error_msg_holder != nullptr &&
       env->GetArrayLength(error_msg_holder) > 0) {
     env->SetObjectArrayElement(error_msg_holder, 0, NewJavaString(env, error));

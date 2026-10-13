@@ -341,6 +341,7 @@ public final class SandboxModule extends BlazeModule {
                 options.getWindowsPsecPolicy(),
                 options.getWindowsSandboxReadonlyRoots(),
                 options.getWindowsPsecMaxIdleEnvironments(),
+                options.getWindowsPsecClientFs(),
                 options.getSandboxDebug());
         spawnRunners.add(spawnRunner);
         builder.registerStrategy(

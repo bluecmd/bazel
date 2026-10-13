@@ -60,6 +60,9 @@ cc_library(
     name = "lib-psec",
     srcs = ["psec.cc"],
     hdrs = ["psec.h"],
+    linkopts = [
+        "-DEFAULTLIB:advapi32.lib",  # AccessCheck, GetNamedSecurityInfoW
+    ],
     target_compatible_with = ["@platforms//os:windows"],
     visibility = ["//src/test/native:__subpackages__"],
 )
