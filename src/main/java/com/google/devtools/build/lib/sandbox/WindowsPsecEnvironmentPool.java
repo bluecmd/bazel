@@ -40,9 +40,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * lifetime: it is created blank (no filesystem access), the policy is applied when an action
  * needs it, and cleared again when the entry is evicted, which makes it blank once more. Blank
  * environments are kept in a stock, which a background thread fills up to {@code spares} ahead
- * of demand, so that a new policy costs only its application (about 0.15 ms per path) instead of
+ * of demand, so that a new policy costs only its application (about 0.1 ms per path) instead of
  * a {@code CreateProcessSecurityEnvironment} round trip. An action that finds the stock empty
- * creates one itself; {@link #starved} counts how often that happened.
+ * creates one itself; {@link #starved} counts how often that happened. Evicted environments always
+ * go back into the stock, so a command creates only a bounded number of environments.
  */
 final class WindowsPsecEnvironmentPool {
 
@@ -165,8 +166,8 @@ final class WindowsPsecEnvironmentPool {
 
   /**
    * @param spares blank environments to keep ready (only with a factory that {@link
-   *     EnvironmentFactory#supportsBlank}); up to this many evicted environments are also kept,
-   *     cleared, instead of closed
+   *     EnvironmentFactory#supportsBlank}); evicted environments are then cleared into the stock
+   *     instead of closed
    */
   WindowsPsecEnvironmentPool(EnvironmentFactory factory, int maxIdle, int spares) {
     this.factory = factory;
@@ -337,14 +338,19 @@ final class WindowsPsecEnvironmentPool {
     }
   }
 
-  /** Clears an unused environment back into the stock if there is room, else closes it. */
+  /**
+   * Clears an unused environment back into the stock. Environments are never closed before the
+   * pool is: every {@code CreateProcessSecurityEnvironment} leaks a logon session in Windows (about
+   * 64 K per boot), so the pool creates as few as it can, at most about the peak number of
+   * concurrent actions plus {@code maxIdle} plus {@code spares} per command.
+   */
   private void retire(long handle, boolean allowNetwork) {
     int net = allowNetwork ? 1 : 0;
-    boolean room;
+    boolean open;
     synchronized (this) {
-      room = spares > 0 && !closed && stock[net].size() < spares;
+      open = spares > 0 && !closed;
     }
-    if (room) {
+    if (open) {
       try {
         factory.clear(handle);
         synchronized (this) {

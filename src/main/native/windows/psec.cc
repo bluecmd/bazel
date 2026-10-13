@@ -850,14 +850,18 @@ void CloseEnvironment(HANDLE env) {
       client_tokens->erase(it);
     }
   }
-  api.close(env);
   if (token != nullptr) {
-    // The service removes the bfs.sys entry of the profile when it tears the
-    // environment down; remove it ourselves too, in case it only does so for
-    // policies it applied. Failure (already gone) is fine.
+    // Delete the bfs.sys policy entry before the environment goes away. The
+    // service's teardown removes it too, but leaks about three paged-pool
+    // allocations (pool tags BfsS, BfsG; ~170 bytes) per granted path in
+    // bfs.sys, for environments it applied paths to as much as for ours,
+    // whereas the delete request frees them. Measured on 10.0.26100.9549;
+    // the leak reaches ~2.3 GB after ~13 M paths, and from then on every
+    // environment creation fails with ERROR_NO_SYSTEM_RESOURCES until reboot.
     DeletePolicyEntry(GetClientFsApi(), token);
-    CloseHandle(token);
   }
+  api.close(env);
+  if (token != nullptr) CloseHandle(token);
 }
 
 #endif  // _WIN32

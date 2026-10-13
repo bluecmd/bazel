@@ -236,30 +236,59 @@ public final class WindowsPsecEnvironmentPoolTest {
   @Test
   public void evictedEnvironmentsAreClearedAndRecycledForOtherPolicies() throws Exception {
     BlankFactory factory = new BlankFactory();
-    // No refills: the refiller blocks until released.
-    factory.blankGate = new CountDownLatch(1);
     WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 0, 1);
-    factory.blankGate.countDown();
+
     WindowsPsecEnvironmentPool.Lease a = pool.acquire(spec("C:\\a"));
     long handleA = a.handle();
     waitFor(() -> pool.stockSize() == 1);
-    // maxIdle = 0: releasing evicts the entry; the stock is full, so it is closed.
+    // maxIdle = 0: releasing evicts the entry. Even with the stock full it is cleared and kept,
+    // not closed.
     a.release();
-    assertThat(factory.closed).containsExactly(handleA);
-
-    // Take the spare: the stock has room again, so the next eviction recycles.
-    factory.blankGate = new CountDownLatch(1); // hold further refills
-    WindowsPsecEnvironmentPool.Lease b = pool.acquire(spec("C:\\b"));
-    long handleB = b.handle();
-    b.release();
-    assertThat(factory.logged("clear " + handleB)).isTrue();
+    assertThat(factory.logged("clear " + handleA)).isTrue();
+    assertThat(factory.closed).isEmpty();
+    assertThat(pool.stockSize()).isEqualTo(2);
     assertThat(pool.recycled.get()).isEqualTo(1);
 
+    // New policies use the stock; nothing new needs creating.
+    int created = factory.created.size();
+    WindowsPsecEnvironmentPool.Lease b = pool.acquire(spec("C:\\b"));
     WindowsPsecEnvironmentPool.Lease c = pool.acquire(spec("C:\\c"));
-    assertThat(c.handle()).isEqualTo(handleB);
-    assertThat(factory.logged("apply " + handleB + " C:\\c")).isTrue();
+    assertThat(factory.logged("apply " + b.handle() + " C:\\b")).isTrue();
+    assertThat(factory.logged("apply " + c.handle() + " C:\\c")).isTrue();
+    assertThat(java.util.List.of(b.handle(), c.handle())).contains(handleA);
+    b.release();
     c.release();
-    factory.blankGate.countDown();
+    assertThat(pool.starved.get()).isEqualTo(1); // Only the very first policy.
+    pool.close();
+    assertThat(factory.closed).containsExactlyElementsIn(factory.created);
+    assertThat(factory.created.size()).isAtMost(created + 2);
+  }
+
+  @Test
+  public void aCommandCreatesBoundedEnvironments() throws Exception {
+    BlankFactory factory = new BlankFactory();
+    WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 4, 2);
+    ExecutorService executor = Executors.newFixedThreadPool(8);
+    try {
+      List<Future<?>> done = new ArrayList<>();
+      for (int i = 0; i < 400; i++) {
+        String p = "C:\\p" + i;
+        done.add(
+            executor.submit(
+                () -> {
+                  pool.acquire(spec(p)).release();
+                  return null;
+                }));
+      }
+      for (Future<?> f : done) {
+        f.get(10, TimeUnit.SECONDS);
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    // 400 distinct policies, at most 8 at a time: in use + idle + spares + refiller slack.
+    assertThat(factory.created.size()).isAtMost(8 + 4 + 2 + 2);
+    assertThat(factory.closed).isEmpty();
     pool.close();
     assertThat(factory.closed).containsExactlyElementsIn(factory.created);
   }
