@@ -851,13 +851,12 @@ void CloseEnvironment(HANDLE env) {
     }
   }
   if (token != nullptr) {
-    // Delete the bfs.sys policy entry before the environment goes away. The
-    // service's teardown removes it too, but leaks about three paged-pool
-    // allocations (pool tags BfsS, BfsG; ~170 bytes) per granted path in
-    // bfs.sys, for environments it applied paths to as much as for ours,
-    // whereas the delete request frees them. Measured on 10.0.26100.9549;
-    // the leak reaches ~2.3 GB after ~13 M paths, and from then on every
-    // environment creation fails with ERROR_NO_SYSTEM_RESOURCES until reboot.
+    // Delete our bfs.sys policy entry while the environment still exists
+    // (the service's teardown removes it too). Neither frees everything:
+    // bfs.sys 10.0.26100.9549 keeps ~170 bytes of paged pool (tags BfsS,
+    // BfsG) per (environment, path) ever granted, and every environment
+    // leaks a logon session (SeLs), which is why the pool recycles
+    // environments instead of creating new ones.
     DeletePolicyEntry(GetClientFsApi(), token);
   }
   api.close(env);
