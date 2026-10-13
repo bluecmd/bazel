@@ -52,7 +52,8 @@ logon sessions of leak 1.
 ## Impact
 
 A sandbox that creates one environment per build action (the natural design,
-and what MXC does) can create about 64 K environments per boot. One clean
+and what the Rust MXC adapter in this directory does) can create about 64 K
+environments per boot. One clean
 build of Bazel is 4 768 sandboxed actions and, with per-file grants, 2.3 M
 granted paths (~400 MB of leaked paged pool).
 
