@@ -335,8 +335,8 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
       reporter.handle(
           Event.info(
               String.format(
-                  "windows-psec (%s, %s): %d actions, %d security environments created (%.1f s,"
-                      + " %d paths), %d actions reused one",
+                  "windows-psec (%s, %s): %d actions, %d policies set up (%.1f s, %d paths), %d"
+                      + " actions reused one",
                   mode.name().toLowerCase(Locale.ROOT),
                   clientFs ? "client-side policy" : "service-side policy",
                   creates + reuses,
@@ -350,11 +350,14 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
         reporter.handle(
             Event.info(
                 String.format(
-                    "windows-psec environment stock: %d policies set up on a ready environment"
-                        + " (%d created ahead, %d recycled), %d starved (created inline, %.1f s);"
+                    "windows-psec environment stock: %d security environments created (%d ahead,"
+                        + " %d inline); %d policies set up on a ready environment, %d recycled"
+                        + " environments returned to the stock, %d starved (created inline, %.1f s);"
                         + " actions waited %.1f s in total for an environment, at most %d ms",
-                    pool.fromStock.get(),
+                    pool.refilled.get() + pool.starved.get(),
                     pool.refilled.get(),
+                    pool.starved.get(),
+                    pool.fromStock.get(),
                     pool.recycled.get(),
                     pool.starved.get(),
                     pool.starvedNanos.get() / 1e9,

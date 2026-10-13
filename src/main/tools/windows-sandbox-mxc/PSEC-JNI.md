@@ -94,8 +94,12 @@ bash action). The flags:
   `C:\mxc\bazel-src` itself carries the change (`C:\mxc\psec\applied.diff`).
 
 At the end of every command the runner reports how the pool was used, e.g.
-`windows-psec (coarse): 43 actions, 4 security environments created (0.2 s,
-81 paths), 39 actions reused one`.
+`windows-psec (coarse, client-side policy): 43 actions, 4 policies set up
+(0.1 s, 79 paths), 39 actions reused one`, and, with client-side policies,
+the environment stock: environments created (ahead by the background thread,
+or inline because the stock was empty), policies set up on a ready
+environment, environments recycled, starved acquisitions and how long
+actions waited for an environment.
 
 ## Design
 
