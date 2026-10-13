@@ -97,6 +97,53 @@ public final class WindowsPsec {
   }
 
   /**
+   * Creates an environment with no filesystem access at all, for {@link #applyFilesystem}. Its
+   * filesystem policy is applied from this process, as with {@code clientFs}.
+   */
+  public static long createBlankEnvironment(
+      boolean disallowWin32k, long uiRestrictions, boolean allowNetwork) throws IOException {
+    String[] error = new String[1];
+    long handle =
+        nativeCreateBlankEnvironment(disallowWin32k, uiRestrictions, allowNetwork, error);
+    if (handle == 0) {
+      throw new IOException(
+          error[0] != null ? error[0] : "CreateProcessSecurityEnvironment failed");
+    }
+    return handle;
+  }
+
+  /** Adds paths to the filesystem policy of an environment from {@link #createBlankEnvironment}. */
+  public static void applyFilesystem(
+      long handle,
+      List<String> readWrite,
+      List<String> readOnly,
+      List<String> deny,
+      List<String> enumerate)
+      throws IOException {
+    String error =
+        nativeApplyFilesystem(
+            handle,
+            readWrite.toArray(new String[0]),
+            readOnly.toArray(new String[0]),
+            deny.toArray(new String[0]),
+            enumerate.toArray(new String[0]));
+    if (!error.isEmpty()) {
+      throw new IOException(error);
+    }
+  }
+
+  /**
+   * Removes every path from the filesystem policy of an environment from {@link
+   * #createBlankEnvironment}. No process may be running in it.
+   */
+  public static void clearFilesystem(long handle) throws IOException {
+    String error = nativeClearFilesystem(handle);
+    if (!error.isEmpty()) {
+      throw new IOException(error);
+    }
+  }
+
+  /**
    * Releases an environment. Must not be called while a process is being created in it; processes
    * already running in it stay confined.
    */
@@ -125,6 +172,14 @@ public final class WindowsPsec {
       boolean allowNetwork,
       boolean clientFs,
       String[] errorHolder);
+
+  private static native long nativeCreateBlankEnvironment(
+      boolean disallowWin32k, long uiRestrictions, boolean allowNetwork, String[] errorHolder);
+
+  private static native String nativeApplyFilesystem(
+      long handle, String[] readWrite, String[] readOnly, String[] deny, String[] enumerate);
+
+  private static native String nativeClearFilesystem(long handle);
 
   private static native void nativeCloseEnvironment(long handle);
 

@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.sandbox;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.sandbox.WindowsPsecPolicyBuilder.Spec;
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -31,17 +32,46 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>An environment can be attached to any number of processes at the same time, so an entry is
  * shared rather than handed out exclusively: concurrent actions with the same policy run in the
- * same environment. Creating an environment costs about 30 ms plus about 1 ms per path, which is
- * what this saves. Entries nobody uses are kept for reuse, least recently used first out, up to a
- * limit; environments are only ever closed while no action is using them.
+ * same environment. Entries nobody uses are kept for reuse, least recently used first out, up to
+ * a limit; environments are only ever reset or closed while no action is using them.
+ *
+ * <p>With a factory that applies filesystem policies itself ({@link
+ * EnvironmentFactory#supportsBlank}), an environment is no longer bound to one policy for its
+ * lifetime: it is created blank (no filesystem access), the policy is applied when an action
+ * needs it, and cleared again when the entry is evicted, which makes it blank once more. Blank
+ * environments are kept in a stock, which a background thread fills up to {@code spares} ahead
+ * of demand, so that a new policy costs only its application (about 0.15 ms per path) instead of
+ * a {@code CreateProcessSecurityEnvironment} round trip. An action that finds the stock empty
+ * creates one itself; {@link #starved} counts how often that happened.
  */
 final class WindowsPsecEnvironmentPool {
 
   /** Creates and closes environments. */
   interface EnvironmentFactory {
+    /** An environment with exactly the policy of {@code spec}. */
     long create(Spec spec) throws IOException;
 
     void close(long handle);
+
+    /** Whether {@link #createBlank}, {@link #apply} and {@link #clear} are supported. */
+    default boolean supportsBlank() {
+      return false;
+    }
+
+    /** An environment with {@code spec}'s network setting and no filesystem access. */
+    default long createBlank(boolean allowNetwork) throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    /** Applies {@code spec}'s paths to a blank environment. */
+    default void apply(long handle, Spec spec) throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    /** Removes all paths from an environment, making it blank again. */
+    default void clear(long handle) throws IOException {
+      throw new UnsupportedOperationException();
+    }
   }
 
   /** The use of an environment by one action. */
@@ -57,7 +87,7 @@ final class WindowsPsecEnvironmentPool {
       return entry.handle;
     }
 
-    /** Whether the environment was created for this lease rather than reused. */
+    /** Whether the environment was set up for this lease rather than reused. */
     boolean created() {
       return entry.creator == this;
     }
@@ -87,23 +117,77 @@ final class WindowsPsecEnvironmentPool {
 
   private final EnvironmentFactory factory;
   private final int maxIdle;
+  private final boolean blank;
+  private final int spares;
   private final Map<Spec, Entry> entries = new HashMap<>();
   // Unused entries, least recently used first.
   private final LinkedHashSet<Entry> idle = new LinkedHashSet<>();
+  // Blank environments, by network setting (index 1 = network allowed).
+  @SuppressWarnings("unchecked")
+  private final ArrayDeque<Long>[] stock = new ArrayDeque[] {new ArrayDeque<>(), new ArrayDeque<>()};
   private boolean closed;
+  private Thread refiller;
 
+  /** Policies set up (a new environment, or a blank one with the policy applied). */
   final AtomicLong creates = new AtomicLong();
+
+  /** Actions that found an environment with their policy. */
   final AtomicLong reuses = new AtomicLong();
+
+  /** Time spent setting up policies, including any inline creation. */
   final AtomicLong createNanos = new AtomicLong();
+
   final AtomicLong createdPaths = new AtomicLong();
 
+  /** Policies set up on a blank environment from the stock. */
+  final AtomicLong fromStock = new AtomicLong();
+
+  /** Policies that found the stock empty and had to create a blank environment inline. */
+  final AtomicLong starved = new AtomicLong();
+
+  /** Time spent creating blank environments inline because the stock was empty. */
+  final AtomicLong starvedNanos = new AtomicLong();
+
+  /** Blank environments created by the background thread. */
+  final AtomicLong refilled = new AtomicLong();
+
+  /** Evicted environments that were cleared and put back into the stock. */
+  final AtomicLong recycled = new AtomicLong();
+
+  /** Time actions spent in {@link #acquire}, including waiting for others' creations. */
+  final AtomicLong acquireNanos = new AtomicLong();
+
+  final AtomicLong maxAcquireNanos = new AtomicLong();
+
   WindowsPsecEnvironmentPool(EnvironmentFactory factory, int maxIdle) {
+    this(factory, maxIdle, 0);
+  }
+
+  /**
+   * @param spares blank environments to keep ready (only with a factory that {@link
+   *     EnvironmentFactory#supportsBlank}); up to this many evicted environments are also kept,
+   *     cleared, instead of closed
+   */
+  WindowsPsecEnvironmentPool(EnvironmentFactory factory, int maxIdle, int spares) {
     this.factory = factory;
     this.maxIdle = maxIdle;
+    this.blank = factory.supportsBlank();
+    this.spares = blank ? spares : 0;
   }
 
   /** Returns an environment for `spec`, creating one if none exists. */
   Lease acquire(Spec spec) throws IOException, InterruptedException {
+    long start = System.nanoTime();
+    try {
+      return doAcquire(spec);
+    } finally {
+      long took = System.nanoTime() - start;
+      acquireNanos.addAndGet(took);
+      maxAcquireNanos.accumulateAndGet(took, Math::max);
+    }
+  }
+
+  private Lease doAcquire(Spec spec) throws IOException, InterruptedException {
     Entry entry;
     Lease lease;
     boolean create;
@@ -127,7 +211,7 @@ final class WindowsPsecEnvironmentPool {
     if (create) {
       long start = System.nanoTime();
       try {
-        entry.handle = factory.create(spec);
+        entry.handle = blank ? setUp(spec) : factory.create(spec);
       } catch (IOException | RuntimeException e) {
         synchronized (this) {
           entries.remove(spec);
@@ -156,6 +240,83 @@ final class WindowsPsecEnvironmentPool {
     return lease;
   }
 
+  /** A blank environment from the stock (or a new one) with `spec` applied. */
+  private long setUp(Spec spec) throws IOException {
+    int net = spec.allowNetwork() ? 1 : 0;
+    Long handle;
+    synchronized (this) {
+      handle = stock[net].poll();
+      if (spares > 0) {
+        // Started on first use: commands that run no sandboxed action create nothing.
+        if (refiller == null) {
+          refiller = new Thread(this::refill, "windows-psec-refill");
+          refiller.setDaemon(true);
+          refiller.start();
+        }
+        notifyAll(); // wake the refiller
+      }
+    }
+    if (handle != null) {
+      fromStock.incrementAndGet();
+    } else {
+      long start = System.nanoTime();
+      handle = factory.createBlank(spec.allowNetwork());
+      starvedNanos.addAndGet(System.nanoTime() - start);
+      starved.incrementAndGet();
+    }
+    try {
+      factory.apply(handle, spec);
+    } catch (IOException | RuntimeException e) {
+      factory.close(handle);
+      throw e;
+    }
+    return handle;
+  }
+
+  /** Keeps the no-network stock at `spares`. */
+  private void refill() {
+    while (true) {
+      synchronized (this) {
+        while (!closed && stock[0].size() >= spares) {
+          try {
+            wait();
+          } catch (InterruptedException e) {
+            return;
+          }
+        }
+        if (closed) {
+          return;
+        }
+      }
+      long handle;
+      try {
+        handle = factory.createBlank(false);
+      } catch (IOException | RuntimeException e) {
+        // Actions create their own and report the error; retry later.
+        synchronized (this) {
+          try {
+            wait(1000);
+          } catch (InterruptedException ie) {
+            return;
+          }
+        }
+        continue;
+      }
+      boolean keep;
+      synchronized (this) {
+        keep = !closed;
+        if (keep) {
+          stock[0].add(handle);
+        }
+      }
+      if (keep) {
+        refilled.incrementAndGet();
+      } else {
+        factory.close(handle);
+      }
+    }
+  }
+
   private void release(Entry entry) {
     List<Entry> evicted = new ArrayList<>();
     synchronized (this) {
@@ -172,13 +333,42 @@ final class WindowsPsecEnvironmentPool {
       }
     }
     for (Entry e : evicted) {
-      factory.close(e.handle);
+      retire(e.handle, e.spec.allowNetwork());
     }
   }
 
-  /** Number of environments currently open. */
+  /** Clears an unused environment back into the stock if there is room, else closes it. */
+  private void retire(long handle, boolean allowNetwork) {
+    int net = allowNetwork ? 1 : 0;
+    boolean room;
+    synchronized (this) {
+      room = spares > 0 && !closed && stock[net].size() < spares;
+    }
+    if (room) {
+      try {
+        factory.clear(handle);
+        synchronized (this) {
+          if (!closed) {
+            stock[net].add(handle);
+            recycled.incrementAndGet();
+            return;
+          }
+        }
+      } catch (IOException | RuntimeException e) {
+        // Close it instead.
+      }
+    }
+    factory.close(handle);
+  }
+
+  /** Number of environments currently set up for a policy. */
   synchronized int size() {
     return entries.size();
+  }
+
+  /** Number of blank environments ready for use. */
+  synchronized int stockSize() {
+    return stock[0].size() + stock[1].size();
   }
 
   /**
@@ -187,16 +377,34 @@ final class WindowsPsecEnvironmentPool {
    */
   void close() {
     List<Entry> all;
+    List<Long> blanks = new ArrayList<>();
+    Thread t;
     synchronized (this) {
       closed = true;
+      notifyAll();
+      t = refiller;
       all = new ArrayList<>(entries.values());
       entries.clear();
       idle.clear();
+      for (ArrayDeque<Long> s : stock) {
+        blanks.addAll(s);
+        s.clear();
+      }
+    }
+    if (t != null) {
+      try {
+        t.join(10_000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
     }
     for (Entry e : all) {
       if (e.created.isDone() && e.handle != 0) {
         factory.close(e.handle);
       }
+    }
+    for (long h : blanks) {
+      factory.close(h);
     }
   }
 }

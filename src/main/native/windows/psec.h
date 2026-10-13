@@ -110,6 +110,20 @@ struct CreateStats {
 HANDLE CreateEnvironment(const Spec& spec, FsApply fs, std::wstring* error,
                          CreateStats* stats = nullptr);
 
+// The three steps of FsApply::kClient, separately, so that environments can
+// be created ahead of time and reused for another policy:
+//
+// Creates an environment with `spec`'s network and UI settings and no
+// filesystem access at all; its paths are ignored.
+HANDLE CreateBlankEnvironment(const Spec& spec, std::wstring* error,
+                              CreateStats* stats = nullptr);
+// Adds `spec`'s paths to the filesystem policy of a blank environment.
+bool ApplyFilesystem(HANDLE env, const Spec& spec, std::wstring* error,
+                     CreateStats* stats = nullptr);
+// Removes every path from the policy of such an environment again. No
+// process may run in it.
+bool ClearFilesystem(HANDLE env, std::wstring* error);
+
 // Releases an environment. Processes already started in it keep running and
 // stay confined; the handle must not be used for new processes afterwards.
 // For a kClient environment no process may still run in it: its filesystem

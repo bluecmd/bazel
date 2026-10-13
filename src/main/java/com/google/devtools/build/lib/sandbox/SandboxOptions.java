@@ -292,6 +292,19 @@ public abstract class SandboxOptions extends OptionsBase {
               + " environment's spec.")
   public abstract boolean getWindowsPsecClientFs();
 
+  @Option(
+      name = "experimental_windows_psec_spare_environments",
+      defaultValue = "8",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "With --experimental_windows_psec_client_fs, the number of blank security environments"
+              + " the windows-psec strategy keeps ready (created in the background, and recycled"
+              + " from evicted ones), so that an action with a new policy only pays for applying"
+              + " its paths. 0 creates every environment when an action needs it. The summary at"
+              + " the end of a build reports how often the stock ran empty.")
+  public abstract int getWindowsPsecSpareEnvironments();
+
   public ImmutableSet<Path> getInaccessiblePaths(FileSystem fs) {
     List<Path> inaccessiblePaths = new ArrayList<>();
     for (PathFragment path : getSandboxBlockPath()) {

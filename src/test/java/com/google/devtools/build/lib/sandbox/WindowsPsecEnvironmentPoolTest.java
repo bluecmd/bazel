@@ -36,7 +36,7 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public final class WindowsPsecEnvironmentPoolTest {
 
-  private static final class FakeFactory implements WindowsPsecEnvironmentPool.EnvironmentFactory {
+  private static class FakeFactory implements WindowsPsecEnvironmentPool.EnvironmentFactory {
     final AtomicLong next = new AtomicLong(100);
     final List<Long> created = new ArrayList<>();
     final List<Long> closed = new ArrayList<>();
@@ -151,5 +151,136 @@ public final class WindowsPsecEnvironmentPoolTest {
 
     factory.fail = false;
     assertThat(pool.acquire(spec("C:\\a")).created()).isTrue();
+  }
+
+  /** A factory with client-side policies: blank environments, apply and clear. */
+  private static final class BlankFactory extends FakeFactory {
+    final List<String> log = new ArrayList<>();
+    CountDownLatch blankGate = new CountDownLatch(0);
+
+    @Override
+    public boolean supportsBlank() {
+      return true;
+    }
+
+    @Override
+    public long createBlank(boolean allowNetwork) throws IOException {
+      try {
+        blankGate.await();
+      } catch (InterruptedException e) {
+        throw new IOException(e);
+      }
+      long h = next.getAndIncrement();
+      synchronized (this) {
+        created.add(h);
+        log.add("blank " + h);
+      }
+      return h;
+    }
+
+    @Override
+    public synchronized void apply(long handle, Spec spec) {
+      log.add("apply " + handle + " " + spec.readOnly().get(0));
+    }
+
+    @Override
+    public synchronized void clear(long handle) {
+      log.add("clear " + handle);
+    }
+
+    synchronized boolean logged(String line) {
+      return log.contains(line);
+    }
+  }
+
+  @Test
+  public void withoutSparesEveryNewPolicyCreatesInlineAndCountsAsStarved() throws Exception {
+    BlankFactory factory = new BlankFactory();
+    WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 4, 0);
+
+    WindowsPsecEnvironmentPool.Lease a = pool.acquire(spec("C:\\a"));
+    WindowsPsecEnvironmentPool.Lease b = pool.acquire(spec("C:\\a"));
+
+    assertThat(a.handle()).isEqualTo(b.handle());
+    assertThat(factory.log).containsExactly("blank 100", "apply 100 C:\\a").inOrder();
+    assertThat(pool.starved.get()).isEqualTo(1);
+    assertThat(pool.fromStock.get()).isEqualTo(0);
+    assertThat(pool.reuses.get()).isEqualTo(1);
+  }
+
+  @Test
+  public void sparesAreCreatedAheadAndUsedForNewPolicies() throws Exception {
+    BlankFactory factory = new BlankFactory();
+    WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 4, 2);
+
+    // The first policy starts the refiller and finds the stock empty.
+    WindowsPsecEnvironmentPool.Lease a = pool.acquire(spec("C:\\a"));
+    assertThat(pool.starved.get()).isEqualTo(1);
+    waitFor(() -> pool.stockSize() == 2);
+
+    WindowsPsecEnvironmentPool.Lease b = pool.acquire(spec("C:\\b"));
+    assertThat(pool.fromStock.get()).isEqualTo(1);
+    assertThat(pool.starved.get()).isEqualTo(1);
+    assertThat(b.handle()).isNotEqualTo(a.handle());
+    assertThat(factory.logged("apply " + b.handle() + " C:\\b")).isTrue();
+    // ... and the refiller tops the stock up again.
+    waitFor(() -> pool.stockSize() == 2);
+    assertThat(pool.refilled.get()).isEqualTo(3);
+
+    a.release();
+    b.release();
+    pool.close();
+    assertThat(factory.closed).containsExactlyElementsIn(factory.created);
+  }
+
+  @Test
+  public void evictedEnvironmentsAreClearedAndRecycledForOtherPolicies() throws Exception {
+    BlankFactory factory = new BlankFactory();
+    // No refills: the refiller blocks until released.
+    factory.blankGate = new CountDownLatch(1);
+    WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 0, 1);
+    factory.blankGate.countDown();
+    WindowsPsecEnvironmentPool.Lease a = pool.acquire(spec("C:\\a"));
+    long handleA = a.handle();
+    waitFor(() -> pool.stockSize() == 1);
+    // maxIdle = 0: releasing evicts the entry; the stock is full, so it is closed.
+    a.release();
+    assertThat(factory.closed).containsExactly(handleA);
+
+    // Take the spare: the stock has room again, so the next eviction recycles.
+    factory.blankGate = new CountDownLatch(1); // hold further refills
+    WindowsPsecEnvironmentPool.Lease b = pool.acquire(spec("C:\\b"));
+    long handleB = b.handle();
+    b.release();
+    assertThat(factory.logged("clear " + handleB)).isTrue();
+    assertThat(pool.recycled.get()).isEqualTo(1);
+
+    WindowsPsecEnvironmentPool.Lease c = pool.acquire(spec("C:\\c"));
+    assertThat(c.handle()).isEqualTo(handleB);
+    assertThat(factory.logged("apply " + handleB + " C:\\c")).isTrue();
+    c.release();
+    factory.blankGate.countDown();
+    pool.close();
+    assertThat(factory.closed).containsExactlyElementsIn(factory.created);
+  }
+
+  @Test
+  public void sparesAreIgnoredWithoutBlankSupport() throws Exception {
+    FakeFactory factory = new FakeFactory();
+    WindowsPsecEnvironmentPool pool = new WindowsPsecEnvironmentPool(factory, 4, 8);
+    pool.acquire(spec("C:\\a")).release();
+    assertThat(factory.created).containsExactly(100L);
+    assertThat(pool.stockSize()).isEqualTo(0);
+    assertThat(pool.starved.get()).isEqualTo(0);
+  }
+
+  private static void waitFor(java.util.function.BooleanSupplier condition) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!condition.getAsBoolean()) {
+      if (System.nanoTime() > deadline) {
+        throw new AssertionError("timed out");
+      }
+      Thread.sleep(5);
+    }
   }
 }

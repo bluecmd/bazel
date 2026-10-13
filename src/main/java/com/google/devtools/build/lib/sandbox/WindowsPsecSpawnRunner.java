@@ -83,6 +83,7 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
       List<PathFragment> readonlyRoots,
       int maxIdleEnvironments,
       boolean clientFs,
+      int spareEnvironments,
       boolean debug)
       throws IOException {
     super(cmdEnv);
@@ -136,8 +137,37 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
               public void close(long handle) {
                 WindowsPsec.closeEnvironment(handle);
               }
+
+              @Override
+              public boolean supportsBlank() {
+                return clientFs;
+              }
+
+              @Override
+              public long createBlank(boolean allowNetwork) throws IOException {
+                try (SilentCloseable c = Profiler.instance().profile("psec.createBlank")) {
+                  return WindowsPsec.createBlankEnvironment(
+                      /* disallowWin32k= */ false,
+                      WindowsPsec.DESKTOP_UI_RESTRICTIONS,
+                      allowNetwork);
+                }
+              }
+
+              @Override
+              public void apply(long handle, Spec spec) throws IOException {
+                try (SilentCloseable c = Profiler.instance().profile("psec.applyPolicy")) {
+                  WindowsPsec.applyFilesystem(
+                      handle, spec.readWrite(), spec.readOnly(), spec.deny(), spec.enumerate());
+                }
+              }
+
+              @Override
+              public void clear(long handle) throws IOException {
+                WindowsPsec.clearFilesystem(handle);
+              }
             },
-            maxIdleEnvironments);
+            maxIdleEnvironments,
+            spareEnvironments);
   }
 
   @Override
@@ -314,6 +344,23 @@ final class WindowsPsecSpawnRunner extends AbstractSandboxSpawnRunner {
                   pool.createNanos.get() / 1e9,
                   pool.createdPaths.get(),
                   reuses)));
+      if (clientFs) {
+        // Starvation: a policy that found no blank environment ready had to wait for a
+        // CreateProcessSecurityEnvironment round trip.
+        reporter.handle(
+            Event.info(
+                String.format(
+                    "windows-psec environment stock: %d policies set up on a ready environment"
+                        + " (%d created ahead, %d recycled), %d starved (created inline, %.1f s);"
+                        + " actions waited %.1f s in total for an environment, at most %d ms",
+                    pool.fromStock.get(),
+                    pool.refilled.get(),
+                    pool.recycled.get(),
+                    pool.starved.get(),
+                    pool.starvedNanos.get() / 1e9,
+                    pool.acquireNanos.get() / 1e9,
+                    pool.maxAcquireNanos.get() / 1_000_000)));
+      }
     }
     pool.close();
     try {

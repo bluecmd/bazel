@@ -547,17 +547,6 @@ class ClientFsApplier {
 
   // processmodel!SandboxFilesystem::ApplyFilesystem, path for path.
   bool Apply(const Spec& spec, std::wstring* error) {
-    struct {
-      HANDLE token;
-      uint32_t flags;
-      uint32_t pad;
-    } entry = {token_, 1, 0};
-    DWORD returned = 0;
-    stats_->in_memory =
-        DeviceIoControl(fs_.bfs, kBfsCreatePolicyEntry, &entry, sizeof(entry),
-                        nullptr, 0, &returned, nullptr) != 0;
-    // Without Feature_BfsInMemoryPolicies the request fails and the first
-    // set-policy request creates a file-backed entry, as for the service.
     std::vector<std::wstring> missing_deny;
     return Vector(spec.read_write, kKindReadWrite, nullptr, error) &&
            Vector(spec.read_only, kKindReadOnly, nullptr, error) &&
@@ -645,39 +634,41 @@ class ClientFsApplier {
   CreateStats* stats_;
 };
 
-// The token of every kClient environment, to remove its policy on close.
+// The token of every kClient environment, to apply and remove its policy.
 std::mutex client_tokens_mu;
 std::unordered_map<HANDLE, HANDLE>* client_tokens =
     new std::unordered_map<HANDLE, HANDLE>();
 
-}  // namespace
+HANDLE ClientToken(HANDLE env) {
+  std::lock_guard<std::mutex> lock(client_tokens_mu);
+  auto it = client_tokens->find(env);
+  return it == client_tokens->end() ? nullptr : it->second;
+}
 
-HANDLE CreateEnvironment(const Spec& spec, FsApply fs, std::wstring* error,
-                         CreateStats* stats) {
-  const Api& api = GetApi();
-  if (api.create == nullptr) {
-    *error = api.error;
-    return nullptr;
-  }
-  CreateStats local_stats;
-  if (stats == nullptr) stats = &local_stats;
-  const ClientFsApi* client_fs = nullptr;
-  Spec service_spec;
-  const Spec* encoded = &spec;
-  if (fs == FsApply::kClient) {
-    client_fs = &GetClientFsApi();
-    if (!client_fs->error.empty()) {
-      *error = L"client-side filesystem policy unavailable: " +
-               client_fs->error;
-      return nullptr;
-    }
-    service_spec.disallow_win32k_system_calls =
-        spec.disallow_win32k_system_calls;
-    service_spec.ui_restrictions = spec.ui_restrictions;
-    service_spec.allow_network = spec.allow_network;
-    encoded = &service_spec;
-  }
-  std::vector<uint8_t> blob = EncodeSpec(*encoded, 1, api.minor, api.ingress);
+// Creates the (empty) bfs.sys policy entry of `token`, in memory if the
+// driver supports it. Without Feature_BfsInMemoryPolicies the request fails
+// and the first set-policy request creates a file-backed entry instead, as
+// it does for the service.
+bool CreatePolicyEntry(const ClientFsApi& fs, HANDLE token) {
+  struct {
+    HANDLE token;
+    uint32_t flags;
+    uint32_t pad;
+  } entry = {token, 1, 0};
+  DWORD returned = 0;
+  return DeviceIoControl(fs.bfs, kBfsCreatePolicyEntry, &entry, sizeof(entry),
+                         nullptr, 0, &returned, nullptr) != 0;
+}
+
+void DeletePolicyEntry(const ClientFsApi& fs, HANDLE token) {
+  DWORD returned = 0;
+  DeviceIoControl(fs.bfs, kBfsDeletePolicyEntry, &token, sizeof(token), nullptr,
+                  0, &returned, nullptr);
+}
+
+HANDLE CreateServiceEnvironment(const Api& api, const Spec& spec,
+                                std::wstring* error) {
+  std::vector<uint8_t> blob = EncodeSpec(spec, 1, api.minor, api.ingress);
   HANDLE env = nullptr;
   HRESULT hr = api.create(blob.data(), static_cast<DWORD>(blob.size()), 0, &env);
   if (FAILED(hr) || env == nullptr) {
@@ -689,29 +680,86 @@ HANDLE CreateEnvironment(const Spec& spec, FsApply fs, std::wstring* error,
     *error = s.str();
     return nullptr;
   }
-  if (client_fs == nullptr) return env;
+  return env;
+}
 
+}  // namespace
+
+HANDLE CreateBlankEnvironment(const Spec& spec, std::wstring* error,
+                              CreateStats* stats) {
+  const Api& api = GetApi();
+  if (api.create == nullptr) {
+    *error = api.error;
+    return nullptr;
+  }
+  CreateStats local_stats;
+  if (stats == nullptr) stats = &local_stats;
+  const ClientFsApi& fs = GetClientFsApi();
+  if (!fs.error.empty()) {
+    *error = L"client-side filesystem policy unavailable: " + fs.error;
+    return nullptr;
+  }
+  Spec blank;
+  blank.disallow_win32k_system_calls = spec.disallow_win32k_system_calls;
+  blank.ui_restrictions = spec.ui_restrictions;
+  blank.allow_network = spec.allow_network;
+  HANDLE env = CreateServiceEnvironment(api, blank, error);
+  if (env == nullptr) return nullptr;
   auto t0 = std::chrono::steady_clock::now();
-  HANDLE token = EnvironmentToken(*client_fs, env, error);
+  HANDLE token = EnvironmentToken(fs, env, error);
   stats->token_ms = MsSince(t0);
   if (token == nullptr) {
     api.close(env);
     return nullptr;
   }
-  t0 = std::chrono::steady_clock::now();
-  ClientFsApplier applier(*client_fs, token, stats);
-  bool ok = applier.Apply(spec, error);
-  stats->apply_ms = MsSince(t0);
-  if (!ok) {
-    DWORD returned = 0;
-    DeviceIoControl(client_fs->bfs, kBfsDeletePolicyEntry, &token,
-                    sizeof(token), nullptr, 0, &returned, nullptr);
-    CloseHandle(token);
-    api.close(env);
-    return nullptr;
-  }
+  stats->in_memory = CreatePolicyEntry(fs, token);
   std::lock_guard<std::mutex> lock(client_tokens_mu);
   (*client_tokens)[env] = token;
+  return env;
+}
+
+bool ApplyFilesystem(HANDLE env, const Spec& spec, std::wstring* error,
+                     CreateStats* stats) {
+  CreateStats local_stats;
+  if (stats == nullptr) stats = &local_stats;
+  HANDLE token = ClientToken(env);
+  if (token == nullptr) {
+    *error = L"not an environment created by CreateBlankEnvironment";
+    return false;
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  ClientFsApplier applier(GetClientFsApi(), token, stats);
+  bool ok = applier.Apply(spec, error);
+  stats->apply_ms = MsSince(t0);
+  return ok;
+}
+
+bool ClearFilesystem(HANDLE env, std::wstring* error) {
+  HANDLE token = ClientToken(env);
+  if (token == nullptr) {
+    *error = L"not an environment created by CreateBlankEnvironment";
+    return false;
+  }
+  const ClientFsApi& fs = GetClientFsApi();
+  DeletePolicyEntry(fs, token);
+  CreatePolicyEntry(fs, token);
+  return true;
+}
+
+HANDLE CreateEnvironment(const Spec& spec, FsApply fs, std::wstring* error,
+                         CreateStats* stats) {
+  const Api& api = GetApi();
+  if (api.create == nullptr) {
+    *error = api.error;
+    return nullptr;
+  }
+  if (fs == FsApply::kService) return CreateServiceEnvironment(api, spec, error);
+  HANDLE env = CreateBlankEnvironment(spec, error, stats);
+  if (env == nullptr) return nullptr;
+  if (!ApplyFilesystem(env, spec, error, stats)) {
+    CloseEnvironment(env);
+    return nullptr;
+  }
   return env;
 }
 
@@ -732,9 +780,7 @@ void CloseEnvironment(HANDLE env) {
     // The service removes the bfs.sys entry of the profile when it tears the
     // environment down; remove it ourselves too, in case it only does so for
     // policies it applied. Failure (already gone) is fine.
-    DWORD returned = 0;
-    DeviceIoControl(GetClientFsApi().bfs, kBfsDeletePolicyEntry, &token,
-                    sizeof(token), nullptr, 0, &returned, nullptr);
+    DeletePolicyEntry(GetClientFsApi(), token);
     CloseHandle(token);
   }
 }

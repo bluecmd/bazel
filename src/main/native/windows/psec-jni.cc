@@ -119,6 +119,50 @@ Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeCreateEnvironment(
   return reinterpret_cast<jlong>(result);
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeCreateBlankEnvironment(
+    JNIEnv* env, jclass clazz, jboolean disallow_win32k, jlong ui_restrictions,
+    jboolean allow_network, jobjectArray error_msg_holder) {
+  bazel::windows::psec::Spec spec;
+  spec.disallow_win32k_system_calls = disallow_win32k;
+  spec.ui_restrictions = static_cast<uint64_t>(ui_restrictions);
+  spec.allow_network = allow_network;
+  std::wstring error;
+  HANDLE result =
+      bazel::windows::psec::CreateBlankEnvironment(spec, &error);
+  if (result == nullptr && error_msg_holder != nullptr &&
+      env->GetArrayLength(error_msg_holder) > 0) {
+    env->SetObjectArrayElement(error_msg_holder, 0, NewJavaString(env, error));
+  }
+  return reinterpret_cast<jlong>(result);
+}
+
+// Returns an empty string on success, else the error.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeApplyFilesystem(
+    JNIEnv* env, jclass clazz, jlong handle, jobjectArray read_write,
+    jobjectArray read_only, jobjectArray deny, jobjectArray enumerate) {
+  bazel::windows::psec::Spec spec;
+  spec.read_write = GetStrings(env, read_write);
+  spec.read_only = GetStrings(env, read_only);
+  spec.deny = GetStrings(env, deny);
+  spec.enumerate = GetStrings(env, enumerate);
+  std::wstring error;
+  bazel::windows::psec::ApplyFilesystem(reinterpret_cast<HANDLE>(handle), spec,
+                                        &error);
+  return NewJavaString(env, error);
+}
+
+// Returns an empty string on success, else the error.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeClearFilesystem(
+    JNIEnv* env, jclass clazz, jlong handle) {
+  std::wstring error;
+  bazel::windows::psec::ClearFilesystem(reinterpret_cast<HANDLE>(handle),
+                                        &error);
+  return NewJavaString(env, error);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_google_devtools_build_lib_windows_WindowsPsec_nativeCloseEnvironment(
     JNIEnv* env, jclass clazz, jlong handle) {

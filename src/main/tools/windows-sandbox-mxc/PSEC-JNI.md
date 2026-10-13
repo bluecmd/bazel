@@ -118,6 +118,25 @@ At the end of every command the runner reports how the pool was used, e.g.
   `ui_restrictions` forces 8-byte table alignment). It was checked against the
   flatc 25.12.19-generated `Verifier` and reader (all fields round-trip, 3 000
   paths, non-ASCII), and `CreateProcessSecurityEnvironment` accepts it.
+* **Client-side filesystem policy** (`FsApply::kClient`,
+  `--experimental_windows_psec_client_fs`, default on). The AppInfo service
+  spends ~1 ms per granted path, mostly in a `GetVolumePathNameW` walk over
+  every ancestor and a file-backed policy-store write
+  (microsoft/mxc#1468, `psec/experiments/fastfs/` on the
+  `windows-sandbox-psec-exe` branch). It skips all of that when the spec has
+  no paths. So the environment is created with empty path vectors, and the
+  server sends the same requests to `\\.\GLOBALROOT\Device\Bfs` itself:
+  `0x228014 {token, 1}` (in-memory policy entry), then per path
+  `GetFileAttributesExW` and `0x228004` (kind 1 read-write, 2 read-only,
+  4 deny, 6 enumerate), denied paths that do not exist retried as
+  directories, `ERROR_ACCESS_DENIED` skipped when the user could not read the
+  path either. `bfs.sys` keys policies on `{TokenUser, AppContainer SID}` of
+  the token handle in the request. The token is taken from a `cmd.exe`
+  started suspended in the new environment and killed right away (~8 ms), so
+  unlike the research probe there is no private `CreateAppContainerToken`
+  call, no `%LOCALAPPDATA%\Packages` diff and no lock around concurrent
+  creates. Closing the environment also deletes the entry (`0x228010`).
+  Network, UI and capabilities still go through the spec and the service.
 * **Process creation.** `AutoAttributeList` and `WaitableProcess::Create`
   (the code every Bazel subprocess on Windows already goes through) take an
   optional environment handle and add it as a second attribute next to the
