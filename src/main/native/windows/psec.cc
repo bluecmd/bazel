@@ -567,6 +567,17 @@ bool IsDriveRoot(const std::wstring& path) {
   return path.size() == 3 && path[1] == L':' && path[2] == L'\\';
 }
 
+// `path` in a form the Win32 and Rtl path functions accept at any length: a
+// drive-letter path at or beyond MAX_PATH gets the \\?\ prefix (Bazel's
+// execroot paths regularly exceed MAX_PATH). Policies are applied to these,
+// whereas the service's GetFileAttributesExW fails on them and skips the path.
+std::wstring LongPath(const std::wstring& path) {
+  if (path.size() >= MAX_PATH - 12 && path.size() > 2 && path[1] == L':') {
+    return L"\\\\?\\" + path;
+  }
+  return path;
+}
+
 class ClientFsApplier {
  public:
   ClientFsApplier(const ClientFsApi& fs, HANDLE token, CreateStats* stats)
@@ -594,8 +605,9 @@ class ClientFsApplier {
     // denied path that does not exist with either type.
     DWORD guess = kind == kKindEnumerate ? kTypeDirectory : kTypeFile;
     for (const std::string& utf8 : paths) {
-      std::wstring path = Widen(utf8);
-      DWORD flags = (kind == kKindReadWrite && IsDriveRoot(path)) ? 0 : 2;
+      std::wstring raw = Widen(utf8);
+      DWORD flags = (kind == kKindReadWrite && IsDriveRoot(raw)) ? 0 : 2;
+      std::wstring path = LongPath(raw);
       if (kind == kKindDeny) {
         DWORD type = TypeOf(path);
         if (type == kTypeMissing) {
