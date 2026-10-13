@@ -440,11 +440,19 @@ are denied, a kind change is an add over the old entry) but costs as much as
 an add (500 paths: remove + apply 171 ms, clear + apply 94 ms), so it pays
 only where consecutive policies share more than half their paths; not done.
 
-The box runs of the stock build failed: the box had reached the logon
-session limit (two fresh-per-action builds today on top of the adapter runs
-since boot). `C:\mxc\psec\box-after-reboot.cmd` (scheduled task
-`mxc-after-reboot`) repeats `precise` + stock, local and `precise` + stock
-after a reboot.
+On the box, after a reboot (the first attempt had hit the logon session
+limit, see above), `--jobs=16`, same protocol, host = this branch on 9.3.0:
+
+| configuration | wall time | vs. local | environments created | logon sessions leaked |
+|---|---|---|---|---|
+| local | 2 018 s | | | |
+| `coarse` (earlier runs, service-side) | 2 400 s | +19 % | ~70 | |
+| `precise`, service-side | 3 228 s | +60 % | 4 768 | ~4 768 |
+| `precise`, client-side, no stock | 2 683 s | +33 % | 4 768 | ~4 768 |
+| **`precise`, client-side + stock** | **2 531 s, 2 494 s** | **+24 %** | **56** | 54, 56 |
+
+Both stock runs: 3 of 4 768 policies found the stock empty (0.3 s of inline
+creation); setup 1 649 / 1 707 s in total, all of it applying paths.
 
 ### Choosing the default granularity
 
