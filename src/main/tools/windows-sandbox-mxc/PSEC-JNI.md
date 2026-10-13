@@ -357,6 +357,59 @@ Per action (profile "action processing" spans, mean over a run):
 80 ms (waiting for one being created); building the policy: median 4 ms, p99
 49 ms, 33 s in total.
 
+### Client-side policies (2026-10-13)
+
+The research on the `windows-sandbox-psec-exe` branch
+(`psec/experiments/fastfs/`) showed that the AppInfo service, not `bfs.sys`,
+is where the ~1 ms per granted path goes. `--experimental_windows_psec_client_fs`
+applies the paths from the Bazel server instead (see Design). From native
+code on the VM (`clientfs/clientfs_bench.cc`, `create` mode, environment
+creation including the token probe and the paths, then the first launch):
+
+| file grants | service-side | client-side | client-side, type guessed |
+|---|---|---|---|
+| 0 | ~45 ms | ~40 ms | ~40 ms |
+| 500 | ~630 ms | ~120 ms | ~95 ms |
+| 4 000 | ~4 800 ms | ~660 ms | ~470 ms |
+
+Enforcement is the same in both modes on every check of the `enforce` mode
+(read and write of granted paths, undeclared read and write, denied file,
+denied missing directory, listing, traverse), with 4 concurrent children,
+and in the example workspace under all three granularities.
+
+Clean builds of Bazel on the box (`--jobs=16`, same protocol as above, host
+= this branch on 9.3.0, `precise` = one environment per action, before the
+environment stock):
+
+| configuration | wall time | sum of environment setup | per action, setup / rest: CppCompile, Javac |
+|---|---|---|---|
+| local | 2 041 s | | — / 7.68 s, — / 17.06 s ¹ |
+| `coarse` (earlier runs) | 2 400 s | 6 s | 0 / 9.25 s, 0 / 20.23 s |
+| `precise`, client-side | **2 683 s** | 3 022 s | 1.07 / 9.95 s, 0.83 / 19.46 s |
+| `precise`, service-side | 3 228 s | 11 870 s | 4.80 / 10.13 s, 3.14 / 19.89 s |
+
+¹ from the earlier local run. "Rest" is the action minus waiting for its
+environment: the tools run about as fast under `precise` as under `coarse`
+(policy size does not slow a tool, see above); what `precise` costs is the
+setup. Client-side policies cut that by 4×: `precise` goes from +58 % to
++31 % over local, against +18 % for `coarse`. Under 16-way load the setup
+takes 363 ms median (p99 4.2 s) for ~480 paths, several times the idle
+figure, because it competes for CPU with 16 compilers.
+
+### Environment stock and the PSEC leaks
+
+With client-side policies an environment can be reused for any policy
+(Design, `WindowsPsecEnvironmentPool`), which takes the creation, the
+AppInfo round trip and the token probe out of an action's path. It also
+turned out to be necessary rather than just faster: Windows leaks one logon
+session per environment (about 64 K per boot) and `bfs.sys` ~170 bytes per
+(environment, path), see [`MXC-ISSUE-leaks.md`](MXC-ISSUE-leaks.md). Two
+`precise` builds with one environment per action, on top of the earlier
+adapter runs since boot, exhausted the box: every further creation failed
+with `ERROR_NO_SYSTEM_RESOURCES`, in either mode, until a reboot. With the
+stock a command creates about its peak concurrency + 32 + 8 environments
+instead of one per action.
+
 ### Choosing the default granularity
 
 All three granularities make the four negative example targets fail, so the
@@ -453,6 +506,16 @@ read-only bind mounts.
   through the worker strategy, and building with `--spawn_strategy=windows-psec`
   disables them, which costs far more than the sandbox (see the measurements).
   Tests (`bazel test`) are untested.
+* **Windows leaks per environment.** Every security environment leaks a
+  logon session (~64 K per boot) and `bfs.sys` ~170 bytes of paged pool per
+  (environment, granted path); see [`MXC-ISSUE-leaks.md`](MXC-ISSUE-leaks.md).
+  Keep `--experimental_windows_psec_client_fs` and
+  `--experimental_windows_psec_spare_environments` > 0 so environments are
+  recycled; with service-side policies, or 0 spares, `precise` creates one
+  environment per action and a machine runs out after about a dozen builds
+  of Bazel per boot (`ERROR_NO_SYSTEM_RESOURCES` from then on, any mode,
+  until a reboot). `fltmc unload bfs` + `fltmc load bfs` (elevated, with no
+  environment open) gives back the `bfs.sys` memory but not the sessions.
 * **Unresolved symlink inputs** (`ctx.actions.symlink` with
   `target_path`) are rejected, as in the old `windows-sandbox` runner.
 * **Tests.** `WindowsPsecPolicyBuilderTest` and `WindowsPsecEnvironmentPoolTest`
