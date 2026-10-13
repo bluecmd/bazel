@@ -485,13 +485,21 @@ HANDLE EnvironmentToken(const ClientFsApi& fs, HANDLE env,
   si.StartupInfo.cb = sizeof(si);
   si.lpAttributeList = attrs;
   PROCESS_INFORMATION pi = {};
-  std::wstring cmdline = L"cmd.exe /c exit 0";
   std::wstring cwd = fs.cmd.substr(0, fs.cmd.find_last_of(L'\\'));
-  BOOL ok = CreateProcessW(
-      fs.cmd.c_str(), &cmdline[0], nullptr, nullptr, FALSE,
-      CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-      nullptr, cwd.c_str(), &si.StartupInfo, &pi);
-  DWORD create_error = GetLastError();
+  // DETACHED_PROCESS: no console, hence no conhost.exe, for a process that
+  // never runs. Under heavy load the launch has been seen to fail once with
+  // ERROR_NO_SYSTEM_RESOURCES; retry a few times before giving up.
+  BOOL ok = FALSE;
+  DWORD create_error = 0;
+  for (int attempt = 0; attempt < 4 && !ok; ++attempt) {
+    if (attempt > 0) Sleep(50 << (2 * attempt));  // 200, 800, 3200 ms
+    std::wstring cmdline = L"cmd.exe /c exit 0";
+    ok = CreateProcessW(
+        fs.cmd.c_str(), &cmdline[0], nullptr, nullptr, FALSE,
+        CREATE_SUSPENDED | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT,
+        nullptr, cwd.c_str(), &si.StartupInfo, &pi);
+    create_error = ok ? 0 : GetLastError();
+  }
   DeleteProcThreadAttributeList(attrs);
   if (!ok) {
     *error = L"starting the token probe in the environment: error " +

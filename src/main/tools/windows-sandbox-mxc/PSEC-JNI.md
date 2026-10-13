@@ -51,6 +51,8 @@ bash action). The flags:
 | `--experimental_windows_psec_policy=coarse\|directories\|precise` | policy granularity, default `coarse` (see below) |
 | `--experimental_windows_sandbox_readonly_root=<dir>` | repeatable; extra readable roots for toolchains outside the execroot (replaces the adapter's `BAZEL_MXC_EXTRA_RO`) |
 | `--experimental_windows_psec_max_idle_environments=N` | unused environments kept for reuse, LRU (default 32) |
+| `--experimental_windows_psec_client_fs` | apply the filesystem policy from the server instead of through the AppInfo service (default on; same enforcement, ~10x cheaper per path) |
+| `--experimental_windows_psec_spare_environments=N` | with client-side policies: blank environments kept ready and recycled across policies (default 8; 0 = create on demand) |
 | `--strategy=Genrule=local` | bash-based mnemonics cannot run in a security environment: MSYS/git-bash dies on its shared `BaseNamedObjects` directory (microsoft/mxc#1061). `cmd_bat` genrules are fine |
 | `--sandbox_debug` | print each action's effective policy (and whether its environment was new or reused) |
 | `requires-network` tag | the only way to get network access; everything else is denied |
@@ -191,6 +193,24 @@ At the end of every command the runner reports how the pool was used, e.g.
   arriving meanwhile wait for it; idle environments stay for reuse (LRU,
   `--experimental_windows_psec_max_idle_environments`) and are only closed
   when nobody uses them, at the latest at the end of the command.
+  With client-side policies an environment is no longer tied to one policy:
+  the pool also keeps a **stock of blank environments** (no filesystem
+  access), filled up to `--experimental_windows_psec_spare_environments` by a
+  background thread that starts with the first sandboxed action. A new policy
+  takes a blank environment from the stock and only applies its paths;
+  evicted environments are cleared (`0x228010` + `0x228014`) and go back into
+  the stock instead of being closed. Clearing and re-applying a small policy
+  takes ~1.4 ms against ~42 ms for a new environment (VM), and the old
+  policy's paths are denied afterwards (checked with 16 threads × 10 recycles,
+  alternating policies). A recycled environment keeps its
+  `...\Packages\sandbox.{guid}\AC\Temp`, so leftovers of an earlier action
+  in that directory are visible to a later one, as they already are for
+  actions sharing an environment. **Starvation** is reported at the end of
+  every command: how many policies were set up on a ready environment
+  (created ahead or recycled), how many found the stock empty and created one
+  inline (and how long that took), and how long actions waited for an
+  environment in total and at most; the profile has `psec.createBlank` and
+  `psec.applyPolicy` spans.
 * **Environment block.** The action's environment is passed verbatim, plus
   `TMP`/`TEMP`/`TMPDIR` = the action's own temp dir `<output_base>\psec\<n>`
   (Windows rewrites `TEMP`/`TMP` inside the environment to the shared
