@@ -414,6 +414,38 @@ with `ERROR_NO_SYSTEM_RESOURCES`, in either mode, until a reboot. With the
 stock a command creates about its peak concurrency + 32 + 8 environments
 instead of one per action.
 
+Clean builds of Bazel on the VM (8 vCPU, `--jobs=8`, workload tree carrying
+the change, as for the VM table above; kernel pool counters read before and
+after each build):
+
+| configuration | wall time | vs. local | environments created | setup, sum | logon sessions leaked | `bfs.sys` allocations leaked |
+|---|---|---|---|---|---|---|
+| local | 2 815 s | | | | | |
+| `coarse` (earlier, service-side) | 3 270 s | +16 % | 74 | 5 s | | |
+| `precise`, service-side (earlier) | 4 400 s | +56 % | 4 774 | 8 191 s | | |
+| `precise`, client-side, no stock (`spare_environments=0`) | 3 570 s | +27 % | 4 774 | 1 336 s | ~4 800 ¹ | +4.2 M (~245 MB) |
+| **`precise`, client-side + stock** (default) | **3 445 s** | **+22 %** | **48** | 975 s | ~50 ¹ | +0.7 M (~40 MB) |
+
+¹ `SeLs` grew by 7 309 and 96; the counter also moves with other logons
+(each ssh connection used to read it), so per build these are upper bounds;
+`churn` mode shows exactly one per environment.
+
+Per action with the stock: CppCompile 0.36 s setup + 7.64 s, Javac 0.30 s +
+11.79 s (service-side `precise`: 3.32 + 7.52 s, 2.14 + 12.37 s; `coarse`
+7.18 s, 11.90 s). Starvation in that build: 1 of 4 774 policies found the
+stock empty. What is left of the setup is applying the paths (median 97 ms,
+p99 1.4 s for ~480 paths). Sending only the difference to an environment's
+previous policy would be the next step; per-path removal works (removed paths
+are denied, a kind change is an add over the old entry) but costs as much as
+an add (500 paths: remove + apply 171 ms, clear + apply 94 ms), so it pays
+only where consecutive policies share more than half their paths; not done.
+
+The box runs of the stock build failed: the box had reached the logon
+session limit (two fresh-per-action builds today on top of the adapter runs
+since boot). `C:\mxc\psec\box-after-reboot.cmd` (scheduled task
+`mxc-after-reboot`) repeats `precise` + stock, local and `precise` + stock
+after a reboot.
+
 ### Choosing the default granularity
 
 All three granularities make the four negative example targets fail, so the
